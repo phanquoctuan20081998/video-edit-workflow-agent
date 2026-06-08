@@ -1,8 +1,9 @@
 """Stage 2 — Script research agent.
 
-research(topic) → outline → write VideoSpec
+research(topic) → outline → write VideoSpec (with beat segmentation)
 
-Output: VideoSpec with scenes[] populated (narration + visual_type + visual_spec).
+Output: VideoSpec with scenes[] populated (narration + visual_type + visual_spec + beats[]).
+Each scene is a "chapter" (~1-3 min) with multiple beats for intra-scene sync.
 Does NOT set manim_code, clip_path, duration_sec (later stages own those).
 """
 
@@ -16,7 +17,7 @@ from uuid import uuid4
 import httpx
 import structlog
 
-from app.models.video_spec import Scene, VideoSpec, VisualType
+from app.models.video_spec import Beat, Scene, VideoSpec, VisualType
 from app.providers.base import LLMMessage
 from app.providers.factory import get_llm_provider
 
@@ -50,25 +51,47 @@ Based on this research about "{topic}":
 
 {research}
 
-Create a scene-by-scene outline for a 3-5 minute explainer video. Each scene should:
-- Have a clear visual purpose (what Manim animation will show)
-- Have a narration beat (what the narrator says in ~15-30 seconds)
-- Build on the previous scene
+Create a scene-by-scene outline for a 3-5 minute explainer video. Each scene is a
+"chapter" lasting 30-120 seconds with MULTIPLE visual beats that flow continuously.
+
+KEY PRINCIPLE: Within a scene, objects persist and transform — no hard cuts between beats.
+Each beat = one visual transition. The animation is continuous (like 3Blue1Brown).
 
 Output JSON array of scenes:
 [
   {{
     "id": "s01",
     "order": 1,
-    "narration": "...",
+    "narration": "Full narration for the entire scene/chapter...",
     "visual_type": "manim",
-    "visual_spec": "describe the specific animation: objects, transforms, emphasis points"
+    "visual_spec": "Overall visual description of the continuous animation",
+    "beats": [
+      {{
+        "id": "s01_b01",
+        "order": 1,
+        "trigger_phrase": "exact substring from narration that starts this beat",
+        "visual_action": "describe what Manim animates: Create/Transform/FadeOut/etc",
+        "narration_segment": "the portion of narration this beat covers"
+      }},
+      {{
+        "id": "s01_b02",
+        "order": 2,
+        "trigger_phrase": "another exact substring",
+        "visual_action": "next animation step, building on previous objects",
+        "narration_segment": "next portion of narration"
+      }}
+    ]
   }},
   ...
 ]
 
-visual_type options: manim (math/geometry), chart (data/bar chart), title_card (intro/outro), static_image.
-Use "manim" for anything involving math, geometry, vectors, functions, transformations.
+RULES:
+- Each scene has 3-8 beats (fewer for simple concepts, more for complex ones)
+- trigger_phrase MUST be an exact substring of the scene's narration
+- Beats should be ordered to match narration flow
+- visual_action describes WHAT changes, referencing objects from previous beats
+- narration_segments concatenated = full narration (no gaps, no overlap)
+- visual_type: manim (math/geometry), chart (data), title_card (intro/outro)
 """
 
 _SCRIPT_REFINE_PROMPT = """\
@@ -81,10 +104,13 @@ Requirements:
 - Each narration should be natural spoken language ({language})
 - visual_spec must be detailed enough for a Manim developer to implement
 - Ensure logical flow from scene to scene
-- Keep each narration 15-30 seconds when spoken aloud
+- Each scene is a chapter (30-120 seconds when spoken)
+- Each beat's trigger_phrase must be an EXACT substring of the scene narration
+- Beat narration_segments must cover the full narration without gaps
+- visual_action should reference objects created in earlier beats within the same scene
 - Total video: 3-5 minutes
 
-Return the refined JSON array only.
+Return the refined JSON array only (same structure with scenes and beats).
 """
 
 
@@ -146,7 +172,7 @@ class ScriptAgent:
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
             system=_OUTLINE_SYSTEM,
-            max_tokens=3000,
+            max_tokens=4000,
             temperature=0.3,
         )
         refined = _parse_json_array(resp.content)
@@ -154,12 +180,25 @@ class ScriptAgent:
         scenes = []
         for i, raw in enumerate(refined):
             visual_type = VisualType(raw.get("visual_type", "manim"))
+
+            # Parse beats
+            beats = []
+            for j, beat_raw in enumerate(raw.get("beats", [])):
+                beats.append(Beat(
+                    id=beat_raw.get("id", f"s{i+1:02d}_b{j+1:02d}"),
+                    order=beat_raw.get("order", j + 1),
+                    trigger_phrase=beat_raw.get("trigger_phrase", ""),
+                    visual_action=beat_raw.get("visual_action", ""),
+                    narration_segment=beat_raw.get("narration_segment", ""),
+                ))
+
             scenes.append(Scene(
                 id=raw.get("id", f"s{i+1:02d}"),
                 order=raw.get("order", i + 1),
                 narration=raw.get("narration", ""),
                 visual_type=visual_type,
                 visual_spec=raw.get("visual_spec", ""),
+                beats=beats,
             ))
 
         spec = VideoSpec(
@@ -168,7 +207,8 @@ class ScriptAgent:
             source_refs=[s.url for s in sources if s.url],
             scenes=scenes,
         )
-        log.info("script.spec_emitted", project_id=spec.project_id, scenes=len(scenes))
+        log.info("script.spec_emitted", project_id=spec.project_id, scenes=len(scenes),
+                 total_beats=sum(len(s.beats) for s in scenes))
         return spec
 
     async def run(self, topic: str, language: str = "vi") -> VideoSpec:

@@ -118,8 +118,27 @@ Create a Manim CE scene for the following animation:
 Visual intent: {visual_spec}
 Narration context: {narration}
 Language: {language}
-
+{beats_section}
 Output ONLY the Python source code, no explanations, no markdown fences.
+"""
+
+_GENERATE_BEATS_SECTION = """\
+
+═══ BEAT STRUCTURE ═══
+This scene has {n_beats} sequential beats. Generate ONE continuous construct() method
+where each beat is a labeled section. Objects persist across beats — use Transform,
+not Create+FadeOut for object changes.
+
+Mark each beat with a comment: # ═══ BEAT {beat_id}: {visual_action} ═══
+After each beat's animations, add: self.wait(1.0)  # beat boundary
+
+Beats (in order):
+{beats_list}
+
+CRITICAL: The animation must be continuous. Objects created in beat 1 should still be
+visible/transformable in beat 3. Only FadeOut objects when the narration explicitly
+moves past them. The self.wait() between beats is where the compositor will cut if using
+split-render strategy, or where timing will be adjusted.
 """
 
 _REPAIR_RUNTIME_PROMPT = """\
@@ -252,10 +271,25 @@ async def run_manim_codegen(spec: VideoSpec, artifact_dir: str | None = None, ma
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
+    beats_section = ""
+    if scene.has_beats:
+        beats_list = "\n".join(
+            f"  {b.order}. [{b.id}] {b.visual_action}\n"
+            f"     Narration: \"{b.narration_segment[:80]}...\""
+            for b in sorted(scene.beats, key=lambda b: b.order)
+        )
+        beats_section = _GENERATE_BEATS_SECTION.format(
+            n_beats=len(scene.beats),
+            beats_list=beats_list,
+            beat_id="{beat_id}",
+            visual_action="{visual_action}",
+        )
+
     prompt = _GENERATE_PROMPT.format(
         visual_spec=scene.visual_spec,
         narration=scene.narration,
         language=spec.language,
+        beats_section=beats_section,
     )
     resp = await llm.complete(
         [LLMMessage(role="user", content=prompt)],

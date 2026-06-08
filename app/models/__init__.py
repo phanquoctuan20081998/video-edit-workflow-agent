@@ -1,4 +1,4 @@
-from .video_spec import VideoSpec, Scene, BGM, SubtitleStyle, VisualType, ProjectStatus
+from .video_spec import VideoSpec, Scene, Beat, BGM, SubtitleStyle, VisualType, ProjectStatus, WordTimestamp
 from .project import Project
 
-__all__ = ["VideoSpec", "Scene", "BGM", "SubtitleStyle", "VisualType", "ProjectStatus", "Project"]
+__all__ = ["VideoSpec", "Scene", "Beat", "BGM", "SubtitleStyle", "VisualType", "ProjectStatus", "WordTimestamp", "Project"]

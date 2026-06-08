@@ -1,6 +1,10 @@
 """VideoSpec — intermediate representation backbone of the pipeline.
 
 Every stage reads/writes only its own fields. See CLAUDE.md §4 for the contract.
+
+Architecture: Scenes are multi-beat "chapters" (1-3 min each). Each beat is one
+visual transition within a continuous Manim animation. Beats enable intra-scene
+sync between narration and animation without hard cuts between related concepts.
 """
 
 from __future__ import annotations
@@ -49,6 +53,28 @@ class WordTimestamp(BaseModel):
     end: float
 
 
+class Beat(BaseModel):
+    """One visual transition within a scene. Beat = atomic visual idea.
+
+    The trigger_phrase anchors this beat to a moment in the narration via word
+    timestamps after TTS. The visual_action tells Manim codegen what animation
+    to play for this beat.
+    """
+
+    id: str
+    order: int
+    trigger_phrase: str  # substring of narration that starts this beat
+    visual_action: str  # describes the Manim animation for this beat
+    narration_segment: str  # the portion of narration this beat covers
+
+    # Filled by beat timing resolver (after voiceover)
+    start_sec: Optional[float] = None
+    duration_sec: Optional[float] = None
+
+    # Filled by split-render strategy (optional per-beat clip)
+    clip_path: Optional[str] = None
+
+
 class Scene(BaseModel):
     id: str
     order: int
@@ -56,7 +82,10 @@ class Scene(BaseModel):
     visual_type: VisualType = VisualType.manim
     visual_spec: str = ""
 
-    # Stage 3 — Manim codegen
+    # Beat layer — intra-scene sync points (Stage 2 script agent sets these)
+    beats: list[Beat] = Field(default_factory=list)
+
+    # Stage 3 — Manim codegen (generates ONE continuous scene covering all beats)
     manim_code: Optional[str] = None
     manim_code_hash: Optional[str] = None
     clip_path: Optional[str] = None
@@ -91,6 +120,15 @@ class Scene(BaseModel):
         self.audio_path = audio_path
         self.duration_sec = duration_sec
         self.word_timestamps = word_timestamps
+
+    @property
+    def has_beats(self) -> bool:
+        return len(self.beats) > 0
+
+    @property
+    def beats_timed(self) -> bool:
+        """True if all beats have timing resolved from word timestamps."""
+        return self.has_beats and all(b.start_sec is not None for b in self.beats)
 
 
 class VideoSpec(BaseModel):
