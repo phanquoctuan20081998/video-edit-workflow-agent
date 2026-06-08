@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./artifacts:/app/artifacts
+    env_file: .env
+    depends_on:
+      - redis
+
+  webui:
+    build: .
+    command: streamlit run webui/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+      - ./artifacts:/app/artifacts
+    env_file: .env
+
+  worker:
+    build: .
+    command: celery -A app.orchestration.celery_app worker --loglevel=info --concurrency=1
+    volumes:
+      - .:/app
+      - ./artifacts:/app/artifacts
+      - /var/run/docker.sock:/var/run/docker.sock  # for sandbox Docker-in-Docker
+    env_file: .env
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Optional: uncomment for Postgres instead of SQLite
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: video_agent
+  #     POSTGRES_USER: video_agent
+  #     POSTGRES_PASSWORD: secret
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+
+# volumes:
+#   pgdata:

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(New-Item -ItemType Directory -Path \"C:\\\\Users\\\\qtphan\\\\Desktop\\\\video-edit-workflow-agent\\\\.claude\\\\skills\\\\manim-scene\" -Force)",
+      "Bash(Out-Null)",
+      "Bash(New-Item -ItemType Directory -Path \"C:\\\\Users\\\\qtphan\\\\Desktop\\\\video-edit-workflow-agent\\\\.claude\\\\skills\\\\sandbox-run\" -Force)",
+      "Bash(Write-Output \"done\")"
+    ]
+  }
+}

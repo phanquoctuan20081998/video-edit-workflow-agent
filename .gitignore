@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Env
+.env
+*.env.local
+
+# Project artifacts
+artifacts/
+*.db
+*.db-shm
+*.db-wal
+sandbox_input/
+sandbox_output/
+
+# Media outputs
+*.mp4
+*.mp3
+*.wav
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db
