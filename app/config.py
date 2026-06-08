@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     reddit_client_secret: str = ""
     reddit_user_agent: str = "video-agent/0.1"
 
+    # Google Trends
+    google_trends_geo: str = ""          # "" = worldwide, "US", "VN", etc.
+    google_trends_keywords: str = "mathematics,physics,algorithm,machine learning"
+
+    # YouTube Data API
+    youtube_api_key: str = ""
+    youtube_search_keywords: str = "math explained,physics explained,algorithm visualization"
+    youtube_max_results: int = 10
+
 
 _settings: Settings | None = None
 

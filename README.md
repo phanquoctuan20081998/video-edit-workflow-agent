@@ -270,6 +270,11 @@ pip install manim==0.18.1
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis URL |
 | `PEXELS_API_KEY` | — | Optional, for stock B-roll |
 | `REDDIT_CLIENT_ID` | — | Optional, for market search |
+| `GOOGLE_TRENDS_GEO` | `""` (worldwide) | Country code for Google Trends, e.g. `US`, `VN` |
+| `GOOGLE_TRENDS_KEYWORDS` | `mathematics,physics,...` | Seed keywords for rising-query search |
+| `YOUTUBE_API_KEY` | — | YouTube Data API v3 key (Google Cloud Console) |
+| `YOUTUBE_SEARCH_KEYWORDS` | `math explained,...` | Search terms for YouTube trending videos |
+| `YOUTUBE_MAX_RESULTS` | `10` | Results per search term |
 
 ---
 

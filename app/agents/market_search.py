@@ -80,6 +80,12 @@ class MarketSearchAgent:
         # HN Ask/Show posts about math
         raw_topics.extend(await _fetch_hn_topics())
 
+        # Google Trends rising queries
+        raw_topics.extend(await _fetch_google_trends(self._cfg))
+
+        # YouTube trending math/science videos
+        raw_topics.extend(await _fetch_youtube_trends(self._cfg))
+
         if not raw_topics:
             log.warning("market_search.no_topics_found")
             return []
@@ -199,6 +205,100 @@ async def _fetch_hn_topics() -> list[dict]:
                     })
     except Exception as e:
         log.warning("market_search.hn_failed", error=str(e))
+    return topics
+
+
+async def _fetch_google_trends(cfg) -> list[dict]:
+    """Fetch rising queries from Google Trends for seed keywords."""
+    topics = []
+    try:
+        from pytrends.request import TrendReq
+        import asyncio
+
+        seed_keywords = [k.strip() for k in cfg.google_trends_keywords.split(",")]
+        geo = cfg.google_trends_geo
+
+        def _sync_fetch() -> list[dict]:
+            pt = TrendReq(hl="en-US", tz=0, timeout=(10, 30))
+            results = []
+            # Batch keywords in groups of 5 (Google Trends limit)
+            for i in range(0, len(seed_keywords), 5):
+                batch = seed_keywords[i:i + 5]
+                try:
+                    pt.build_payload(batch, cat=0, timeframe="now 7-d", geo=geo)
+                    related = pt.related_queries()
+                    for kw in batch:
+                        rising = related.get(kw, {}).get("rising")
+                        if rising is not None and not rising.empty:
+                            for _, row in rising.head(5).iterrows():
+                                query = str(row.get("query", "")).strip()
+                                if query:
+                                    results.append({
+                                        "title": query,
+                                        "source": "google_trends",
+                                        "url": f"https://trends.google.com/trends/explore?q={query}&geo={geo}",
+                                    })
+                except Exception as e:
+                    log.warning("market_search.google_trends_batch_failed", batch=batch, error=str(e))
+            return results
+
+        topics = await asyncio.get_event_loop().run_in_executor(None, _sync_fetch)
+        log.info("market_search.google_trends_done", count=len(topics))
+    except ImportError:
+        log.warning("market_search.google_trends_skipped", reason="pytrends not installed")
+    except Exception as e:
+        log.warning("market_search.google_trends_failed", error=str(e))
+    return topics
+
+
+async def _fetch_youtube_trends(cfg) -> list[dict]:
+    """Fetch trending math/science videos via YouTube Data API v3."""
+    topics = []
+    if not cfg.youtube_api_key:
+        log.info("market_search.youtube_skipped", reason="no YOUTUBE_API_KEY")
+        return topics
+    try:
+        from googleapiclient.discovery import build
+        import asyncio
+
+        search_terms = [k.strip() for k in cfg.youtube_search_keywords.split(",")]
+
+        def _sync_fetch() -> list[dict]:
+            youtube = build("youtube", "v3", developerKey=cfg.youtube_api_key)
+            results = []
+            for term in search_terms:
+                try:
+                    response = youtube.search().list(
+                        q=term,
+                        part="snippet",
+                        type="video",
+                        order="viewCount",          # most-viewed recent
+                        publishedAfter="2024-01-01T00:00:00Z",
+                        videoCategoryId="28",        # Science & Technology
+                        maxResults=cfg.youtube_max_results,
+                        relevanceLanguage="en",
+                    ).execute()
+
+                    for item in response.get("items", []):
+                        snippet = item.get("snippet", {})
+                        title = snippet.get("title", "").strip()
+                        video_id = item.get("id", {}).get("videoId", "")
+                        if title:
+                            results.append({
+                                "title": title,
+                                "source": "youtube",
+                                "url": f"https://www.youtube.com/watch?v={video_id}",
+                            })
+                except Exception as e:
+                    log.warning("market_search.youtube_search_failed", term=term, error=str(e))
+            return results
+
+        topics = await asyncio.get_event_loop().run_in_executor(None, _sync_fetch)
+        log.info("market_search.youtube_done", count=len(topics))
+    except ImportError:
+        log.warning("market_search.youtube_skipped", reason="google-api-python-client not installed")
+    except Exception as e:
+        log.warning("market_search.youtube_failed", error=str(e))
     return topics
 
 
