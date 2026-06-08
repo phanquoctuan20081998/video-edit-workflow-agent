@@ -10,6 +10,85 @@ type: task
 
 # manim-scene — Manim Codegen, Repair & QA
 
+## 3Blue1Brown visual design system
+
+Every generated scene MUST start with this header (defined in `app/templates/base.py:STYLE_HEADER`):
+
+```python
+from manim import *
+import numpy as np
+
+BACKGROUND_COLOR = "#1C1C2E"  # deep navy — never pure black
+P_BLUE   = "#58C4DD"   # primary objects
+P_GREEN  = "#83C167"   # secondary objects
+P_YELLOW = "#FFFF00"   # emphasis / final answer
+P_GOLD   = "#C49A04"   # softer emphasis
+P_RED    = "#FC6255"   # negation / error
+P_TEAL   = "#49A88F"   # transforms / in-between state
+P_WHITE  = "#FFFFFF"   # ALL text and formulas
+P_GREY   = "#BDBDBD"   # secondary labels
+P_AXIS   = "#1C758A"   # axes, grids (subdued)
+P_DIM    = "#55534E"   # dashed construction lines
+```
+
+First line of `construct()`: `self.camera.background_color = BACKGROUND_COLOR`
+
+### Color semantics
+Colors carry meaning. Same color = same concept across entire scene.
+
+| Color | Semantic |
+|-------|----------|
+| P_BLUE | Primary object — vectors, main curve, key shape |
+| P_GREEN | Secondary / supporting object |
+| P_YELLOW | Final result, peak emphasis — use sparingly |
+| P_RED | Negation, cancellation, removal |
+| P_AXIS | Axes, NumberPlane, grid — never dominant |
+| P_DIM | DashedLine, construction aids |
+| P_WHITE | All text and MathTex |
+
+Never assign colors arbitrarily. Viewer infers same color = same concept.
+
+### Typography rules
+- `MathTex` for ALL math — never `Text("f(x) = x^2")`
+- After creating MathTex: `if tex.width > 10: tex.scale(10 / tex.width)`
+- Title: `Text("...", font_size=40, color=P_WHITE).to_edge(UP, buff=0.5)`
+- Labels: `.scale(0.65)`, `next_to(obj, direction, buff=0.25)`
+
+### Layout rules
+- No overlaps — `VGroup(a, b, c).arrange(DOWN, buff=0.75)`
+- Never hardcode shifts — use `to_edge()`, `next_to()`, `move_to()`
+- Frame = 14.22 × 8.0 units. Nothing within 0.5 units of edge.
+- Max 6–8 objects simultaneously. More → `FadeOut` old ones first.
+
+### Animation rhythm
+```
+Write(tex)                  ← formulas drawn stroke-by-stroke (ALWAYS for math)
+Create(shape)               ← shapes traced along path
+FadeIn(obj)                 ← background context only, NEVER for hero math
+Transform(A, B)             ← A becomes B — core 3b1b technique
+Indicate(obj)               ← pulse focus without moving
+Circumscribe(obj)           ← draw circle to highlight
+SurroundingRectangle(obj, color=P_YELLOW)  ← box a key term
+```
+
+Pacing:
+- `self.wait(1.0)` after every major reveal
+- `self.wait(0.5)` between minor beats
+- `run_time=1.0` standard; `1.5–2.0` for transforms; `0.5` for minor highlights
+- **Never `self.wait(0)`**
+
+### Anti-patterns (AI slop — QA will fail these)
+- `self.add(a, b, c, d)` — all objects appear at once with no animation
+- `FadeIn(equation)` — use `Write(equation)`
+- Objects that appear and never move, highlight, or change
+- Random colors with no semantic assignment
+- `Text()` for math expressions
+- Hardcoded `.shift(3.14159)`
+- Pure black background
+- 8+ equations visible simultaneously
+
+---
+
 ## Version constraint
 
 Manim **Community Edition** only. Never use `manimlib` (3Blue1Brown's fork).
