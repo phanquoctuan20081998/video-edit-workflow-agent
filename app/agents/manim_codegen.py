@@ -278,9 +278,11 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
             f"     Narration: \"{b.narration_segment[:80]}...\""
             for b in sorted(scene.beats, key=lambda b: b.order)
         )
+        # Escape any braces in beats_list before inserting into format string
+        beats_list_escaped = beats_list.replace("{", "{{").replace("}", "}}")
         beats_section = _GENERATE_BEATS_SECTION.format(
             n_beats=len(scene.beats),
-            beats_list=beats_list,
+            beats_list=beats_list_escaped,
             beat_id="{beat_id}",
             visual_action="{visual_action}",
         )

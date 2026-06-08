@@ -9,7 +9,8 @@ Heavy media nodes (manim_codegen, final render) dispatch to Celery workers.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import json
+from typing import Optional
 
 import structlog
 from langgraph.graph import END, StateGraph
@@ -28,6 +29,8 @@ class ProjectState(TypedDict):
     hitl_feedback: Optional[str]
     error: Optional[str]
     final_video_path: Optional[str]
+    _candidates: list              # topic candidates from market_search, for HITL UI
+    _composite_path: str           # set by composite node, read by render node
 
 
 # ── Node functions ─────────────────────────────────────────────────────────────
@@ -49,10 +52,14 @@ async def node_market_search(state: ProjectState) -> ProjectState:
 
 
 async def node_topic_approval(state: ProjectState) -> ProjectState:
-    """HITL checkpoint — graph pauses here until user approves a topic."""
-    # LangGraph interrupt mechanism: this node is an interrupt point.
-    # The orchestration layer calls graph.update_state() with approved topic.
-    log.info("graph.waiting_topic_approval")
+    """HITL checkpoint — resumes after user sets hitl_feedback to chosen topic title."""
+    feedback = state.get("hitl_feedback")
+    if feedback:
+        state["topic"] = feedback
+        state["hitl_feedback"] = None
+        log.info("graph.topic_approved", topic=state["topic"])
+    else:
+        log.warning("graph.topic_approval_no_feedback")
     return state
 
 
@@ -67,8 +74,17 @@ async def node_script(state: ProjectState) -> ProjectState:
 
 
 async def node_script_approval(state: ProjectState) -> ProjectState:
-    """HITL checkpoint — graph pauses here until user approves script."""
-    log.info("graph.waiting_script_approval")
+    """HITL checkpoint — resumes after user sets hitl_feedback to updated spec JSON or 'approved'."""
+    feedback = state.get("hitl_feedback")
+    if feedback and feedback != "approved":
+        try:
+            state["spec"] = json.loads(feedback)
+            log.info("graph.script_approved_with_edits")
+        except (json.JSONDecodeError, TypeError):
+            log.warning("graph.script_approval_bad_feedback", feedback=feedback[:100])
+    else:
+        log.info("graph.script_approved")
+    state["hitl_feedback"] = None
     return state
 
 
@@ -122,9 +138,12 @@ async def node_render(state: ProjectState) -> ProjectState:
 
     spec = VideoSpec.model_validate(state["spec"])
     cfg = get_settings()
+    composite_path = state.get("_composite_path") or ""
+    if not composite_path:
+        raise ValueError("composite_path missing from state — composite stage must run first")
     final_path = await run_render(
         spec,
-        composite_path=state.get("_composite_path", ""),
+        composite_path=composite_path,
         artifact_dir=cfg.artifact_dir,
     )
     spec.final_video_path = final_path
@@ -192,6 +211,8 @@ if __name__ == "__main__":
             "hitl_feedback": None,
             "error": None,
             "final_video_path": None,
+            "_candidates": [],
+            "_composite_path": "",
         }
 
         print(f"Starting pipeline for topic: {topic}")
