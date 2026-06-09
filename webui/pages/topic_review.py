@@ -10,6 +10,7 @@ Background-task pattern:
 from __future__ import annotations
 
 import concurrent.futures
+import time
 import uuid
 from datetime import datetime
 
@@ -36,29 +37,33 @@ def _executor() -> concurrent.futures.ThreadPoolExecutor:
 
 @st.fragment(run_every=2)
 def _running_poll(run_key: str) -> None:
-    """Fragment that auto-reruns every 2s without a full page rerun."""
     store = _task_store()
     task = store.get(run_key, {})
     if task.get("status") == "running":
-        st.info("🔍 Market search running… (you can navigate away and come back)")
-        st.caption("⏳ Fetching and scoring topics...")
+        elapsed = int(time.monotonic() - task.get("started_at", time.monotonic()))
+        st.info(f"🔍 Market search running… ({elapsed}s elapsed)")
+        for msg in task.get("log", []):
+            st.caption(f"▸ {msg}")
     else:
         st.rerun()
 
 
 def _start_search(run_key: str, prompt: str, n_topics: int) -> None:
     store = _task_store()
-    store[run_key] = {"status": "running", "prompt": prompt}
+    store[run_key] = {"status": "running", "prompt": prompt, "log": [], "started_at": time.monotonic()}
 
     def _worker():
         try:
-            from app.agents.market_search import MarketSearchAgent
             import asyncio
+            from app.agents.market_search import MarketSearchAgent
+            store[run_key]["log"].append("Initializing market search agent…")
             agent = MarketSearchAgent()
+            store[run_key]["log"].append("Querying arXiv, Reddit, HackerNews, YouTube Trends…")
             candidates = asyncio.run(agent.search(
                 n_topics=n_topics,
                 interest_prompt=prompt or None,
             ))
+            store[run_key]["log"].append(f"Scoring {len(candidates)} candidates by trending + visualizability…")
             result = [
                 {
                     "title":     c.title,
@@ -128,10 +133,15 @@ def render() -> None:
 
         elif task["status"] == "done":
             candidates = task["candidates"]
+            proj_now = st.session_state.get("current_project") or {}
+            pid = proj_now.get("project_id", "")
             st.session_state["topic_candidates"] = candidates
             st.session_state["selected_topic_idx"] = None
-            pid = (st.session_state.get("current_project") or {}).get("project_id", "")
             save_topic_search(pid, task.get("prompt", ""), candidates)
+            if pid:
+                save_project(pid, proj_now.get("topic", ""), proj_now.get("language", "en"), "searched")
+                if "current_project" in st.session_state:
+                    st.session_state["current_project"]["status"] = "searched"
             del store[run_key]
             st.session_state.pop("search_run_key", None)
             st.rerun()
@@ -162,6 +172,11 @@ def render() -> None:
     if col3.button("🔍 Run Market Search", type="primary"):
         key = str(uuid.uuid4())[:8]
         st.session_state["search_run_key"] = key
+        proj = st.session_state.get("current_project") or {}
+        pid  = proj.get("project_id", "")
+        if pid:
+            save_project(pid, proj.get("topic", ""), proj.get("language", "en"), "searching")
+            st.session_state["current_project"]["status"] = "searching"
         _start_search(key, interest_prompt, int(n_topics))
         st.rerun()
 
@@ -227,4 +242,5 @@ def render() -> None:
             }
             st.session_state["approved_topic"] = final_topic
             st.session_state["language"] = final_lang
-            st.success(f"Topic approved: **{final_topic}**. Go to **Script** to generate the VideoSpec.")
+            st.session_state["pending_stage_nav"] = "📝  Script"
+            st.rerun()
