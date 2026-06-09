@@ -53,98 +53,95 @@ def _pipeline_html(statuses: list[str]) -> str:
         "failed":  "stage-failed",
     }
 
-    stage_html = ""
+    # Flat structure: card → arrow → card → arrow → …
+    parts: list[str] = []
     for i, stage in enumerate(_STAGES):
         st_cls = css_class[statuses[i]]
         icon   = icons[statuses[i]]
         hitl   = '<span class="hitl-badge">HITL</span>' if stage["hitl"] else ""
-        arrow  = ""
+        parts.append(
+            f'<div class="stage-box {st_cls}">{hitl}'
+            f'<div class="stage-icon">{icon}</div>'
+            f'<div class="stage-num">Stage {stage["num"]}</div>'
+            f'<div class="stage-name">{stage["name"]}</div>'
+            f'<div class="stage-desc">{stage["desc"]}</div>'
+            f'</div>'
+        )
         if i < len(_STAGES) - 1:
-            arr_cls = "arrow-active" if statuses[i] == "done" else "arrow"
-            arrow = f'<div class="{arr_cls}">&#8594;</div>'
+            arr_cls = "arrow active" if statuses[i] == "done" else "arrow"
+            parts.append(f'<div class="{arr_cls}"></div>')
 
-        stage_html += f"""
-        <div class="stage-wrapper">
-          <div class="stage-box {st_cls}">
-            {hitl}
-            <div class="stage-icon">{icon}</div>
-            <div class="stage-num">Stage {stage["num"]}</div>
-            <div class="stage-name">{stage["name"]}</div>
-            <div class="stage-desc">{stage["desc"]}</div>
-          </div>
-          {arrow}
-        </div>
-        """
+    stage_html = "".join(parts)
 
-    return f"""
-    <style>
-      .pipeline {{
-        display: flex;
-        align-items: center;
-        gap: 0;
-        padding: 24px 16px;
-        overflow-x: auto;
-        background: #0e1117;
-        border-radius: 14px;
-        border: 1px solid #1f2937;
-      }}
-      .stage-wrapper {{ display: flex; align-items: center; }}
-      .stage-box {{
-        width: 140px;
-        min-height: 120px;
-        border-radius: 12px;
-        padding: 14px 12px;
-        text-align: center;
-        position: relative;
-        border: 2px solid;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 5px;
-        flex-shrink: 0;
-      }}
-      .stage-pending {{
-        background: #111827;
-        border-color: #374151;
-        color: #4b5563;
-      }}
-      .stage-running {{
-        background: #1e3a5f;
-        border-color: #3b82f6;
-        color: #93c5fd;
-        animation: pulse-glow 1.8s ease-in-out infinite;
-      }}
-      .stage-done {{
-        background: #052e16;
-        border-color: #16a34a;
-        color: #86efac;
-      }}
-      .stage-failed {{
-        background: #450a0a;
-        border-color: #dc2626;
-        color: #fca5a5;
-      }}
-      @keyframes pulse-glow {{
-        0%, 100% {{ box-shadow: 0 0 0 0 rgba(59,130,246,0.6); }}
-        50%       {{ box-shadow: 0 0 0 10px rgba(59,130,246,0); }}
-      }}
-      .stage-icon  {{ font-size: 22px; line-height: 1; }}
-      .stage-num   {{ font-size: 10px; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }}
-      .stage-name  {{ font-size: 13px; font-weight: 700; line-height: 1.3; }}
-      .stage-desc  {{ font-size: 10px; opacity: .65; }}
-      .hitl-badge {{
-        position: absolute; top: -10px; right: -8px;
-        background: #7c3aed; color: #fff;
-        font-size: 9px; font-weight: 700;
-        padding: 2px 7px; border-radius: 10px;
-        text-transform: uppercase; letter-spacing: .06em;
-      }}
-      .arrow       {{ color: #374151; font-size: 22px; margin: 0 10px; flex-shrink: 0; }}
-      .arrow-active {{ color: #16a34a; font-size: 22px; margin: 0 10px; flex-shrink: 0; }}
-    </style>
-    <div class="pipeline">{stage_html}</div>
-    """
+    return f"""<style>
+.pipeline {{
+  display: flex;
+  align-items: stretch;
+  padding: 20px 8px;
+  background: transparent;
+  width: 100%;
+  box-sizing: border-box;
+}}
+.stage-box {{
+  flex: 1;
+  min-height: 130px;
+  border-radius: 12px;
+  padding: 14px 8px;
+  text-align: center;
+  position: relative;
+  border: 2px solid;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}}
+.stage-pending {{ background: #111827; border-color: #374151; color: #4b5563; }}
+.stage-running {{ background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; animation: pulse-glow 1.8s ease-in-out infinite; }}
+.stage-done    {{ background: #052e16; border-color: #16a34a; color: #86efac; }}
+.stage-failed  {{ background: #450a0a; border-color: #dc2626; color: #fca5a5; }}
+@keyframes pulse-glow {{
+  0%, 100% {{ box-shadow: 0 0 0 0 rgba(59,130,246,0.6); }}
+  50%       {{ box-shadow: 0 0 0 10px rgba(59,130,246,0); }}
+}}
+.stage-icon {{ font-size: 20px; line-height: 1; }}
+.stage-num  {{ font-size: 9px; text-transform: uppercase; letter-spacing: .08em; opacity: .55; }}
+.stage-name {{ font-size: 12px; font-weight: 700; line-height: 1.3; }}
+.stage-desc {{ font-size: 9px; opacity: .65; }}
+.hitl-badge {{
+  position: absolute; top: -9px; right: -7px;
+  background: #7c3aed; color: #fff;
+  font-size: 8px; font-weight: 700;
+  padding: 2px 6px; border-radius: 8px;
+  text-transform: uppercase; letter-spacing: .05em;
+}}
+.arrow {{
+  flex: 0 0 32px;
+  position: relative;
+  align-self: center;
+}}
+.arrow::before {{
+  content: '';
+  position: absolute;
+  top: 50%; left: 0; right: 8px;
+  height: 2px;
+  background: #374151;
+  transform: translateY(-50%);
+}}
+.arrow::after {{
+  content: '';
+  position: absolute;
+  right: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 0; height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid #374151;
+}}
+.arrow.active::before {{ background: #16a34a; }}
+.arrow.active::after  {{ border-left-color: #16a34a; }}
+</style>
+<div class="pipeline">{stage_html}</div>"""
 
 
 def render() -> None:
@@ -155,7 +152,9 @@ def render() -> None:
     project_status = proj.get("status") if proj else None
 
     statuses = _derive_statuses(project_status)
-    st.iframe(_pipeline_html(statuses), height=220, scrolling=False)
+    html = _pipeline_html(statuses)
+    html_compact = "\n".join(line for line in html.splitlines() if line.strip())
+    st.markdown(html_compact, unsafe_allow_html=True)
 
     # ── Status legend ─────────────────────────────────────────────────────────
     st.markdown("")
