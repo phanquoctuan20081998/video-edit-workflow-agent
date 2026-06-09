@@ -177,7 +177,7 @@ class ScriptAgent:
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
             system=_OUTLINE_SYSTEM,
-            max_tokens=5000,
+            max_tokens=32000,
             temperature=0.5,
         )
         scenes_data = await self._parse_or_repair_json_array(resp.content, step="outline")
@@ -204,7 +204,7 @@ class ScriptAgent:
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
             system=_OUTLINE_SYSTEM,
-            max_tokens=8000,
+            max_tokens=65000,
             temperature=0.3,
         )
         refined = await self._parse_or_repair_json_array(resp.content, step="refine")
@@ -267,7 +267,7 @@ class ScriptAgent:
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=repair_prompt)],
             system=_JSON_REPAIR_SYSTEM,
-            max_tokens=8000,
+            max_tokens=65000,
             temperature=0,
         )
         repaired = _parse_json_array(resp.content)

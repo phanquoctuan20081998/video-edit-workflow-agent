@@ -31,7 +31,7 @@ from app.sandbox.runner import SandboxResult, sandbox_exec
 
 log = structlog.get_logger()
 
-_CODEGEN_MAX_TOKENS = 6000
+_CODEGEN_MAX_TOKENS = 16000
 
 _GENERATE_SYSTEM = """\
 You are an expert Manim Community Edition (CE) developer generating math/physics explainer
@@ -224,6 +224,7 @@ async def render_scene(
             scene.set_manim_code(code)
             sandbox_result = (
                 _syntax_check(code)
+                or _scene_subclass_check(code)
                 or _latex_source_check(code)
                 or sandbox_exec(code, output_dir=out_dir)
             )
@@ -411,6 +412,33 @@ def _syntax_check(code: str) -> SandboxResult | None:
             traceback="".join(traceback_module.format_exception_only(type(exc), exc)).strip(),
         )
     return None
+
+
+def _scene_subclass_check(code: str) -> SandboxResult | None:
+    """Return failure if no class inheriting from Scene is found."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None  # _syntax_check handles this
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                name = base.id if isinstance(base, ast.Name) else (base.attr if isinstance(base, ast.Attribute) else "")
+                if name == "Scene":
+                    return None
+    return SandboxResult(
+        success=False,
+        error_type="runtime_error",
+        traceback=(
+            "No Scene subclass found in generated code.\n"
+            "You MUST define exactly one class inheriting from Scene:\n\n"
+            "    class YourSceneName(Scene):\n"
+            "        def construct(self):\n"
+            "            self.camera.background_color = BACKGROUND_COLOR\n"
+            "            ...\n\n"
+            "Output ONLY the complete Python file. Do not wrap in markdown."
+        ),
+    )
 
 
 def _latex_source_check(code: str) -> SandboxResult | None:
