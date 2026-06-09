@@ -155,8 +155,7 @@ def render() -> None:
     project_status = proj.get("status") if proj else None
 
     statuses = _derive_statuses(project_status)
-    import streamlit.components.v1 as components
-    components.html(_pipeline_html(statuses), height=220, scrolling=False)
+    st.iframe(_pipeline_html(statuses), height=220, scrolling=False)
 
     # ── Status legend ─────────────────────────────────────────────────────────
     st.markdown("")
