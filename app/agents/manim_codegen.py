@@ -207,6 +207,7 @@ class RenderResult:
 
 from collections.abc import Callable
 ProgressCb = Callable[[str, str], None]   # (scene_id, message) -> None
+LogCb = Callable[[str], None]             # (log_line) -> None
 
 
 async def render_scene(
@@ -216,6 +217,7 @@ async def render_scene(
     max_repairs: int = 4,
     n_variants: int = 1,
     progress_cb: ProgressCb | None = None,
+    log_cb: LogCb | None = None,
 ) -> RenderResult:
     """Generate + exec + repair + QA a single scene. Updates scene in-place on success."""
     cfg = get_settings()
@@ -223,9 +225,16 @@ async def render_scene(
     out_dir = os.path.join(base_dir, spec.project_id, "scenes", scene.id)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
+    import time as _time
+
     def _emit(msg: str) -> None:
         if progress_cb:
             progress_cb(scene.id, msg)
+
+    def _log(msg: str) -> None:
+        if log_cb:
+            ts = _time.strftime("%H:%M:%S")
+            log_cb(f"[{ts}] {msg}")
 
     # Cache check
     cached = _check_cache(scene, out_dir)
@@ -233,6 +242,7 @@ async def render_scene(
         log.info("manim_codegen.cache_hit", scene_id=scene.id, hash=scene.manim_code_hash)
         scene.set_clip(cached, qa_passed=True)
         _emit("✅ cache hit")
+        _log(f"[{scene.id}] Cache hit — skipping render")
         return RenderResult(success=True, clip_path=cached, qa_passed=True, code=scene.manim_code, attempts=0)
 
     llm = get_llm_provider()
@@ -240,13 +250,18 @@ async def render_scene(
 
     for variant in range(n_variants):
         _emit(f"🤖 generating code (variant {variant + 1}/{n_variants})…")
+        _log(f"[{scene.id}] Sending visual_spec + {len(scene.beats)} beats to LLM for code generation…")
+        _log(f"[{scene.id}] visual_spec: {scene.visual_spec[:120]}…")
         log.info("manim_codegen.generate", scene_id=scene.id, variant=variant)
         code = await _generate_code(llm, scene, spec)
+        n_lines = len(code.splitlines())
+        _log(f"[{scene.id}] LLM returned {n_lines} lines of Python")
         total_attempts = 0
 
         for attempt in range(max_repairs + 1):
             total_attempts += 1
             _emit(f"🏃 sandbox attempt {attempt + 1}/{max_repairs + 1}…")
+            _log(f"[{scene.id}] Running pre-checks + sandbox (attempt {attempt + 1})…")
             log.info("manim_codegen.exec", scene_id=scene.id, attempt=attempt)
             scene.set_manim_code(code)
             sandbox_result = (
@@ -258,9 +273,11 @@ async def render_scene(
 
             if not sandbox_result.success:
                 error_text = _short_error(sandbox_result)
+                _log(f"[{scene.id}] ❌ {sandbox_result.error_type}:\n{error_text}")
                 if attempt == max_repairs:
                     scene.set_manim_code(code)
                     _emit(f"❌ repair cap reached — flagged for human review")
+                    _log(f"[{scene.id}] Repair cap ({max_repairs}) reached. Flagging for human.")
                     log.warning(
                         "manim_codegen.repair_cap_runtime",
                         scene_id=scene.id,
@@ -278,6 +295,7 @@ async def render_scene(
                     )
                     break
                 _emit(f"🔧 repairing {sandbox_result.error_type} (attempt {attempt + 1})…")
+                _log(f"[{scene.id}] Sending error + code to LLM for repair (attempt {attempt + 1})…")
                 log.info(
                     "manim_codegen.repair_runtime",
                     scene_id=scene.id,
@@ -285,11 +303,14 @@ async def render_scene(
                     error=error_text,
                 )
                 code = await _repair_runtime(llm, code, sandbox_result)
+                _log(f"[{scene.id}] Repaired code: {len(code.splitlines())} lines")
                 continue
 
+            _log(f"[{scene.id}] ✅ Sandbox OK — sampling frames for visual QA…")
             # Sandbox succeeded — run visual QA
             _emit("👁️ visual QA…")
             frames = sample_frames(sandbox_result.clip_path, n=4, output_dir=os.path.join(out_dir, "frames"))
+            _log(f"[{scene.id}] Sending {len(frames)} frames to vision model…")
             qa = await vision_qa(frames, intent=scene.visual_spec, narration=scene.narration)
 
             if qa.passed:
@@ -297,9 +318,11 @@ async def render_scene(
                 scene.set_manim_code(code)
                 scene.set_clip(dest, qa_passed=True)
                 _emit(f"✅ done ({total_attempts} attempt{'s' if total_attempts > 1 else ''})")
+                _log(f"[{scene.id}] ✅ QA passed. Clip saved to {dest}")
                 log.info("manim_codegen.success", scene_id=scene.id, attempts=total_attempts)
                 return RenderResult(success=True, clip_path=dest, qa_passed=True, code=code, attempts=total_attempts)
 
+            _log(f"[{scene.id}] ⚠️ QA failed: {'; '.join(qa.issues)}")
             if _is_qa_infrastructure_error(qa.issues):
                 dest = _save_clip(sandbox_result.clip_path, out_dir, scene.id)
                 _emit("⚠️ QA infrastructure error — saved, flagged for review")
@@ -349,6 +372,7 @@ async def run_manim_codegen(
     artifact_dir: str | None = None,
     max_repairs: int = 4,
     progress_cb: ProgressCb | None = None,
+    log_cb: LogCb | None = None,
 ) -> VideoSpec:
     """Run Manim codegen for all manim/chart scenes in spec."""
     from app.models.video_spec import VisualType
@@ -364,7 +388,13 @@ async def run_manim_codegen(
             continue
         if progress_cb:
             progress_cb(scene.id, "⏳ queued…")
-        await render_scene(scene, spec, artifact_dir=artifact_dir, max_repairs=max_repairs, progress_cb=progress_cb)
+        await render_scene(
+            scene, spec,
+            artifact_dir=artifact_dir,
+            max_repairs=max_repairs,
+            progress_cb=progress_cb,
+            log_cb=log_cb,
+        )
     return spec
 
 
