@@ -97,19 +97,18 @@ with st.sidebar:
     # ── New project form ──────────────────────────────────────────────────────
     if selected_pid is None:
         with st.form("new_project_form", clear_on_submit=True):
-            new_topic = st.text_input("Topic", placeholder="e.g. Fast Fourier Transform")
-            new_lang  = st.selectbox("Language", _LANG_OPTIONS)
+            new_topic = st.text_input("Project name", placeholder="e.g. Fast Fourier Transform")
             if st.form_submit_button("Create", type="primary") and new_topic.strip():
                 pid = str(uuid.uuid4())
-                save_project(pid, new_topic.strip(), new_lang, "searched")
+                save_project(pid, new_topic.strip(), "en", "searched")
                 st.session_state["current_project"] = {
                     "project_id": pid,
                     "topic": new_topic.strip(),
-                    "language": new_lang,
+                    "language": "en",
                     "status": "searched",
                 }
                 st.session_state["approved_topic"] = new_topic.strip()
-                st.session_state["language"] = new_lang
+                st.session_state["language"] = "en"
                 st.rerun()
 
     # ── Load project when selection changes ───────────────────────────────────

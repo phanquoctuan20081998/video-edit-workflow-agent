@@ -36,12 +36,13 @@ def _now_iso() -> str:
 
 # ── Topic search history ──────────────────────────────────────────────────────
 
-def save_topic_search(prompt: str, candidates: list[dict]) -> str:
+def save_topic_search(project_id: str, prompt: str, candidates: list[dict]) -> str:
     run_id = f"{_ts()}_{str(uuid4())[:8]}"
     _write(
         DATA_DIR / "topic_searches" / f"{run_id}.json",
         {
             "run_id": run_id,
+            "project_id": project_id,
             "timestamp": _now_iso(),
             "prompt": prompt,
             "candidates": candidates,
@@ -50,7 +51,7 @@ def save_topic_search(prompt: str, candidates: list[dict]) -> str:
     return run_id
 
 
-def load_topic_searches() -> list[dict]:
+def load_topic_searches(project_id: str | None = None) -> list[dict]:
     search_dir = DATA_DIR / "topic_searches"
     if not search_dir.exists():
         return []
@@ -58,7 +59,8 @@ def load_topic_searches() -> list[dict]:
     for f in sorted(search_dir.glob("*.json"), reverse=True):
         data = _read(f)
         if data:
-            runs.append(data)
+            if project_id is None or data.get("project_id") == project_id:
+                runs.append(data)
     return runs
 
 

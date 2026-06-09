@@ -138,9 +138,7 @@ def render() -> None:
     # ── Script history ────────────────────────────────────────────────────────
     all_scripts = load_scripts()
     pid = proj.get("project_id", "")
-    proj_scripts  = [s for s in all_scripts if s.get("project_id") == pid]
-    other_scripts = [s for s in all_scripts if s.get("project_id") != pid]
-    history = proj_scripts + other_scripts
+    history = [s for s in all_scripts if s.get("project_id") == pid]
 
     if history:
         with st.expander(f"📋 Script History ({len(history)} saved)", expanded=False):

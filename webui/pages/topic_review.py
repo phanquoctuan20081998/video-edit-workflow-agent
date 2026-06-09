@@ -122,7 +122,8 @@ def render() -> None:
             candidates = task["candidates"]
             st.session_state["topic_candidates"] = candidates
             st.session_state["selected_topic_idx"] = None
-            save_topic_search(task.get("prompt", ""), candidates)
+            pid = (st.session_state.get("current_project") or {}).get("project_id", "")
+            save_topic_search(pid, task.get("prompt", ""), candidates)
             del store[run_key]
             st.session_state.pop("search_run_key", None)
             st.rerun()
@@ -159,7 +160,8 @@ def render() -> None:
     st.divider()
 
     # ── History ───────────────────────────────────────────────────────────────
-    history = load_topic_searches()
+    current_pid = (st.session_state.get("current_project") or {}).get("project_id")
+    history = load_topic_searches(project_id=current_pid)
     if history:
         with st.expander(f"📋 Search History ({len(history)} runs)", expanded=False):
             for run in history:
