@@ -18,14 +18,14 @@ def _fmt_dt(iso: str) -> str:
         return iso[:16]
 
 
-def _render_all_scenes(spec, max_repairs: int):
+def _render_all_scenes(spec, max_repairs: int, progress_cb=None):
     from app.agents.manim_codegen import run_manim_codegen
-    return asyncio.run(run_manim_codegen(spec, max_repairs=max_repairs))
+    return asyncio.run(run_manim_codegen(spec, max_repairs=max_repairs, progress_cb=progress_cb))
 
 
-def _render_one_scene(scene, spec, max_repairs: int):
+def _render_one_scene(scene, spec, max_repairs: int, progress_cb=None):
     from app.agents.manim_codegen import render_scene
-    asyncio.run(render_scene(scene, spec, max_repairs=max_repairs))
+    asyncio.run(render_scene(scene, spec, max_repairs=max_repairs, progress_cb=progress_cb))
 
 
 def render() -> None:
@@ -53,9 +53,20 @@ def render() -> None:
     run_all = col2.button("▶ Run Manim Codegen (All Scenes)", type="primary")
 
     if run_all:
-        with st.spinner("Generating and rendering all scenes..."):
+        scene_ids = [s.id for s in spec.scenes]
+        status_map: dict[str, str] = {sid: "⏳ queued" for sid in scene_ids}
+
+        with st.status("Running Manim Codegen…", expanded=True) as status_box:
+            rows = {sid: st.empty() for sid in scene_ids}
+            for sid, placeholder in rows.items():
+                placeholder.markdown(f"**{sid}** — {status_map[sid]}")
+
+            def on_progress(scene_id: str, msg: str) -> None:
+                status_map[scene_id] = msg
+                rows[scene_id].markdown(f"**{scene_id}** — {msg}")
+
             try:
-                spec = _render_all_scenes(spec, max_repairs)
+                spec = _render_all_scenes(spec, max_repairs, progress_cb=on_progress)
                 spec_dict = spec.model_dump()
                 st.session_state["approved_spec"] = spec_dict
                 for scene in spec.scenes:
@@ -66,7 +77,9 @@ def render() -> None:
                     st.session_state["current_project"]["status"] = "animated"
                 from webui.state import save_spec
                 save_spec(spec)
+                status_box.update(label="Codegen complete ✅", state="complete", expanded=False)
             except Exception as e:
+                status_box.update(label=f"Codegen failed: {e}", state="error")
                 st.error(f"Codegen failed: {e}")
                 return
         st.rerun()
@@ -143,17 +156,22 @@ def render() -> None:
                 if not scene.clip_qa_passed and not override_pass:
                     all_approved = False
                     if st.button(f"Re-generate {scene.id}", key=f"regen_{scene.id}"):
-                        with st.spinner(f"Re-generating {scene.id}..."):
+                        with st.status(f"Re-generating {scene.id}…", expanded=True) as regen_status:
+                            msg_slot = st.empty()
+                            def _regen_cb(sid: str, msg: str) -> None:
+                                msg_slot.markdown(f"**{sid}** — {msg}")
                             try:
                                 scene.manim_code      = None
                                 scene.manim_code_hash = None
-                                _render_one_scene(scene, spec, max_repairs)
+                                _render_one_scene(scene, spec, max_repairs, progress_cb=_regen_cb)
                                 spec_dict = spec.model_dump()
                                 st.session_state["approved_spec"] = spec_dict
                                 save_scene_render(pid, scene.id, scene.model_dump())
                                 from webui.state import save_spec
                                 save_spec(spec)
+                                regen_status.update(label=f"{scene.id} done ✅", state="complete", expanded=False)
                             except Exception as e:
+                                regen_status.update(label=f"Failed: {e}", state="error")
                                 st.error(f"Re-generate failed: {e}")
                         st.rerun()
 

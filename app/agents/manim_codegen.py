@@ -128,7 +128,22 @@ Visual intent: {visual_spec}
 Narration context: {narration}
 Language: {language}
 {beats_section}
-Output ONLY the Python source code, no explanations, no markdown fences.
+YOUR RESPONSE MUST FOLLOW THIS EXACT SKELETON — no exceptions:
+
+from manim import *
+import numpy as np
+
+BACKGROUND_COLOR = "#1C1C2E"
+P_BLUE = "#58C4DD"
+# ... other palette constants ...
+
+class SceneName(Scene):
+    def construct(self):
+        self.camera.background_color = BACKGROUND_COLOR
+        # animation code here
+
+Output ONLY the Python source code. No markdown fences. No prose. No explanation.
+The top-level class MUST inherit from Scene.
 """
 
 _GENERATE_BEATS_SECTION = """\
@@ -190,12 +205,17 @@ class RenderResult:
     error: str | None = None
 
 
+from collections.abc import Callable
+ProgressCb = Callable[[str, str], None]   # (scene_id, message) -> None
+
+
 async def render_scene(
     scene: Scene,
     spec: VideoSpec,
     artifact_dir: str | None = None,
     max_repairs: int = 4,
     n_variants: int = 1,
+    progress_cb: ProgressCb | None = None,
 ) -> RenderResult:
     """Generate + exec + repair + QA a single scene. Updates scene in-place on success."""
     cfg = get_settings()
@@ -203,23 +223,30 @@ async def render_scene(
     out_dir = os.path.join(base_dir, spec.project_id, "scenes", scene.id)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
+    def _emit(msg: str) -> None:
+        if progress_cb:
+            progress_cb(scene.id, msg)
+
     # Cache check
     cached = _check_cache(scene, out_dir)
     if cached:
         log.info("manim_codegen.cache_hit", scene_id=scene.id, hash=scene.manim_code_hash)
         scene.set_clip(cached, qa_passed=True)
+        _emit("✅ cache hit")
         return RenderResult(success=True, clip_path=cached, qa_passed=True, code=scene.manim_code, attempts=0)
 
     llm = get_llm_provider()
     best_result: RenderResult | None = None
 
     for variant in range(n_variants):
+        _emit(f"🤖 generating code (variant {variant + 1}/{n_variants})…")
         log.info("manim_codegen.generate", scene_id=scene.id, variant=variant)
         code = await _generate_code(llm, scene, spec)
         total_attempts = 0
 
         for attempt in range(max_repairs + 1):
             total_attempts += 1
+            _emit(f"🏃 sandbox attempt {attempt + 1}/{max_repairs + 1}…")
             log.info("manim_codegen.exec", scene_id=scene.id, attempt=attempt)
             scene.set_manim_code(code)
             sandbox_result = (
@@ -233,6 +260,7 @@ async def render_scene(
                 error_text = _short_error(sandbox_result)
                 if attempt == max_repairs:
                     scene.set_manim_code(code)
+                    _emit(f"❌ repair cap reached — flagged for human review")
                     log.warning(
                         "manim_codegen.repair_cap_runtime",
                         scene_id=scene.id,
@@ -249,6 +277,7 @@ async def render_scene(
                         error=error_text,
                     )
                     break
+                _emit(f"🔧 repairing {sandbox_result.error_type} (attempt {attempt + 1})…")
                 log.info(
                     "manim_codegen.repair_runtime",
                     scene_id=scene.id,
@@ -259,6 +288,7 @@ async def render_scene(
                 continue
 
             # Sandbox succeeded — run visual QA
+            _emit("👁️ visual QA…")
             frames = sample_frames(sandbox_result.clip_path, n=4, output_dir=os.path.join(out_dir, "frames"))
             qa = await vision_qa(frames, intent=scene.visual_spec, narration=scene.narration)
 
@@ -266,11 +296,13 @@ async def render_scene(
                 dest = _save_clip(sandbox_result.clip_path, out_dir, scene.id)
                 scene.set_manim_code(code)
                 scene.set_clip(dest, qa_passed=True)
+                _emit(f"✅ done ({total_attempts} attempt{'s' if total_attempts > 1 else ''})")
                 log.info("manim_codegen.success", scene_id=scene.id, attempts=total_attempts)
                 return RenderResult(success=True, clip_path=dest, qa_passed=True, code=code, attempts=total_attempts)
 
             if _is_qa_infrastructure_error(qa.issues):
                 dest = _save_clip(sandbox_result.clip_path, out_dir, scene.id)
+                _emit("⚠️ QA infrastructure error — saved, flagged for review")
                 best_result = RenderResult(
                     success=True, clip_path=dest, qa_passed=False, code=code,
                     attempts=total_attempts, flagged_for_human=True,
@@ -312,16 +344,27 @@ async def render_scene(
     )
 
 
-async def run_manim_codegen(spec: VideoSpec, artifact_dir: str | None = None, max_repairs: int = 4) -> VideoSpec:
+async def run_manim_codegen(
+    spec: VideoSpec,
+    artifact_dir: str | None = None,
+    max_repairs: int = 4,
+    progress_cb: ProgressCb | None = None,
+) -> VideoSpec:
     """Run Manim codegen for all manim/chart scenes in spec."""
     from app.models.video_spec import VisualType
     for scene in spec.scenes:
         if scene.visual_type not in (VisualType.manim, VisualType.chart):
+            if progress_cb:
+                progress_cb(scene.id, f"⏭️ skipped ({scene.visual_type.value})")
             continue
         if scene.clip_qa_passed:
             log.info("manim_codegen.scene_already_done", scene_id=scene.id)
+            if progress_cb:
+                progress_cb(scene.id, "✅ already done")
             continue
-        await render_scene(scene, spec, artifact_dir=artifact_dir, max_repairs=max_repairs)
+        if progress_cb:
+            progress_cb(scene.id, "⏳ queued…")
+        await render_scene(scene, spec, artifact_dir=artifact_dir, max_repairs=max_repairs, progress_cb=progress_cb)
     return spec
 
 
@@ -356,7 +399,9 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
         max_tokens=_CODEGEN_MAX_TOKENS,
         temperature=0.3,
     )
-    return _strip_code_fences(resp.content)
+    code = _strip_code_fences(resp.content)
+    code = _inject_palette_if_missing(code)
+    return _ensure_scene_subclass(code)
 
 
 async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
@@ -367,7 +412,9 @@ async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
         max_tokens=_CODEGEN_MAX_TOKENS,
         temperature=0.2,
     )
-    return _strip_code_fences(resp.content)
+    code = _strip_code_fences(resp.content)
+    code = _inject_palette_if_missing(code)
+    return _ensure_scene_subclass(code)
 
 
 def _short_error(result: SandboxResult, max_chars: int = 1200) -> str:
@@ -412,6 +459,94 @@ def _syntax_check(code: str) -> SandboxResult | None:
             traceback="".join(traceback_module.format_exception_only(type(exc), exc)).strip(),
         )
     return None
+
+
+_PALETTE_HEADER = """\
+BACKGROUND_COLOR = "#1C1C2E"
+P_BLUE   = "#58C4DD"
+P_GREEN  = "#83C167"
+P_YELLOW = "#FFFF00"
+P_GOLD   = "#C49A04"
+P_RED    = "#FC6255"
+P_TEAL   = "#49A88F"
+P_WHITE  = "#FFFFFF"
+P_GREY   = "#BDBDBD"
+P_AXIS   = "#1C758A"
+P_DIM    = "#55534E"
+"""
+
+
+def _inject_palette_if_missing(code: str) -> str:
+    """Add palette constants after imports if any P_* or BACKGROUND_COLOR is used but not defined."""
+    import re
+    used = set(re.findall(r'\b(P_[A-Z]+|BACKGROUND_COLOR)\b', code))
+    if not used:
+        return code
+    defined = set(re.findall(r'^(P_[A-Z]+|BACKGROUND_COLOR)\s*=', code, re.MULTILINE))
+    if not (used - defined):
+        return code
+    # Insert after last import line
+    lines = code.splitlines(keepends=True)
+    insert_at = 0
+    for i, line in enumerate(lines):
+        if line.strip().startswith(("import ", "from ")):
+            insert_at = i + 1
+    lines.insert(insert_at, "\n" + _PALETTE_HEADER + "\n")
+    return "".join(lines)
+
+
+def _has_scene_subclass(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                name = (base.id if isinstance(base, ast.Name)
+                        else base.attr if isinstance(base, ast.Attribute) else "")
+                if name == "Scene":
+                    return True
+    return False
+
+
+def _ensure_scene_subclass(code: str) -> str:
+    """Wrap code in a Scene class if the LLM forgot to include one."""
+    if _has_scene_subclass(code):
+        return code
+
+    # Split off imports (keep at module level)
+    import_lines, body_lines = [], []
+    for line in code.splitlines():
+        s = line.strip()
+        if s.startswith(("import ", "from ")) or (not s and not body_lines):
+            import_lines.append(line)
+        else:
+            body_lines.append(line)
+
+    imports = "\n".join(import_lines) if import_lines else "from manim import *\nimport numpy as np"
+    # Ensure palette constants present
+    if "BACKGROUND_COLOR" not in imports:
+        imports += '\n\nBACKGROUND_COLOR = "#1C1C2E"'
+
+    body = "\n".join(body_lines)
+    has_construct = "def construct" in body
+
+    if has_construct:
+        # Indent whole body into class
+        indented = "\n".join("    " + l for l in body.splitlines())
+        log.warning("manim_codegen.autowrap_construct", reason="no Scene subclass, had construct()")
+        return f"{imports}\n\nclass GeneratedScene(Scene):\n{indented}\n"
+    else:
+        # Wrap as construct body
+        indented = "\n".join("        " + l for l in body.splitlines())
+        log.warning("manim_codegen.autowrap_body", reason="no Scene subclass, no construct()")
+        return (
+            f"{imports}\n\nclass GeneratedScene(Scene):\n"
+            f"    def construct(self):\n"
+            f"        self.camera.background_color = BACKGROUND_COLOR\n"
+            f"{indented}\n"
+        )
 
 
 def _scene_subclass_check(code: str) -> SandboxResult | None:
