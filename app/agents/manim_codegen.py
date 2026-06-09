@@ -72,6 +72,8 @@ Assign ONE meaning per color, keep it for the entire scene:
   P_DIM    → DashedLine, construction aids
   P_WHITE  → ALL text and MathTex
 NEVER assign colors arbitrarily. Viewer infers: same color = same concept.
+Manim color helpers need ManimColor objects. If using interpolate_color with palette
+constants, write: interpolate_color(ManimColor(P_BLUE), ManimColor(P_GREEN), alpha).
 
 ═══ TYPOGRAPHY ═══
 - MathTex for ALL math. Never: Text("f(x) = x²") — always: MathTex(r"f(x) = x^2")
@@ -81,6 +83,10 @@ NEVER assign colors arbitrarily. Viewer infers: same color = same concept.
   Bad: MathTex(r"T_j \\text{ xử lý } k : 2^j \\le |k| < 2^{j+1}")
   Good: VGroup(MathTex(r"T_j"), Text("xử lý"), MathTex(r"k : 2^j \\le |k| < 2^{j+1}"))
 - After creating MathTex, check width: if tex.width > 10: tex.scale(10 / tex.width)
+- Never include citations or bibliography commands in rendered scenes: no \\cite,
+  \\bibitem, \\bibliography, \\begin{thebibliography}, or paper-reference fragments.
+- For long norms/suprema, split into 2-3 short MathTex lines rather than one giant
+  expression. A readable schematic plus one key formula is better than a paper excerpt.
 - Title: Text("title", font_size=40, color=P_WHITE).to_edge(UP, buff=0.5)
 - Labels: scale(0.65) relative to main objects, next_to(obj, direction, buff=0.25)
 
@@ -126,6 +132,7 @@ Pacing:
 ❌ Dense single-frame summaries with shape + matrix + equation + paragraph together
 ❌ Missing waits between reveals
 ❌ MathTex wider than 10 units (always check .width)
+❌ Bibliography/citation commands or copied paper fragments in MathTex
 ❌ Text() for math expressions
 ❌ Hardcoded shifts: .shift(RIGHT * 3.14159)
 ❌ Pure black background: background_color = BLACK
@@ -450,9 +457,7 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
         temperature=0.3,
     )
     code = _strip_code_fences(resp.content)
-    code = _inject_palette_if_missing(code)
-    code = _ensure_scene_subclass(code)
-    return _fix_zero_animations(code)
+    return _postprocess_generated_code(code)
 
 
 async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
@@ -464,9 +469,7 @@ async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
         temperature=0.2,
     )
     code = _strip_code_fences(resp.content)
-    code = _inject_palette_if_missing(code)
-    code = _ensure_scene_subclass(code)
-    return _fix_zero_animations(code)
+    return _postprocess_generated_code(code)
 
 
 def _short_error(result: SandboxResult, max_chars: int = 1200) -> str:
@@ -497,7 +500,7 @@ async def _repair_visual(llm, code: str, issues: list[str]) -> str:
         max_tokens=_CODEGEN_MAX_TOKENS,
         temperature=0.2,
     )
-    return _strip_code_fences(resp.content)
+    return _postprocess_generated_code(_strip_code_fences(resp.content))
 
 
 def _syntax_check(code: str) -> SandboxResult | None:
@@ -528,6 +531,14 @@ P_DIM    = "#55534E"
 """
 
 
+def _postprocess_generated_code(code: str) -> str:
+    code = _inject_palette_if_missing(code)
+    code = _ensure_scene_subclass(code)
+    code = _fix_background_color(code)
+    code = _fix_interpolate_color_args(code)
+    return _fix_zero_animations(code)
+
+
 def _inject_palette_if_missing(code: str) -> str:
     """Add palette constants after imports if any P_* or BACKGROUND_COLOR is used but not defined."""
     import re
@@ -545,6 +556,51 @@ def _inject_palette_if_missing(code: str) -> str:
             insert_at = i + 1
     lines.insert(insert_at, "\n" + _PALETTE_HEADER + "\n")
     return "".join(lines)
+
+
+def _fix_background_color(code: str) -> str:
+    """Force generated Manim scenes to use the app palette background."""
+    import re
+
+    fixed = code
+    fixed = re.sub(
+        r"(self\.camera\.background_color\s*=\s*)(?:BLACK|\"#000000\"|'#000000'|\"#000\"|'#000')",
+        r"\1BACKGROUND_COLOR",
+        fixed,
+    )
+    fixed = re.sub(
+        r"(config\.background_color\s*=\s*)(?:BLACK|\"#000000\"|'#000000'|\"#000\"|'#000')",
+        r"\1BACKGROUND_COLOR",
+        fixed,
+    )
+
+    if "self.camera.background_color" not in fixed:
+        fixed = re.sub(
+            r"(\n\s*def construct\(self\):\n)",
+            r"\1        self.camera.background_color = BACKGROUND_COLOR\n",
+            fixed,
+            count=1,
+        )
+
+    if fixed != code:
+        log.warning("manim_codegen.auto_fix_background_color")
+    return fixed
+
+
+def _fix_interpolate_color_args(code: str) -> str:
+    """Wrap string palette constants passed to interpolate_color() as ManimColor(...)."""
+    import re
+
+    color_arg = r"(?:P_[A-Z]+|BACKGROUND_COLOR|['\"]#[0-9A-Fa-f]{6}['\"])"
+    pattern = re.compile(rf"interpolate_color\(\s*({color_arg})\s*,\s*({color_arg})\s*,")
+
+    def _wrap(arg: str) -> str:
+        return arg if arg.startswith("ManimColor(") else f"ManimColor({arg})"
+
+    fixed = pattern.sub(lambda m: f"interpolate_color({_wrap(m.group(1))}, {_wrap(m.group(2))},", code)
+    if fixed != code:
+        log.warning("manim_codegen.auto_fix_interpolate_color_args")
+    return fixed
 
 
 def _fix_zero_animations(code: str) -> str:
@@ -644,14 +700,36 @@ def _scene_subclass_check(code: str) -> SandboxResult | None:
 
 
 def _latex_source_check(code: str) -> SandboxResult | None:
-    """Catch Unicode in Tex/MathTex before pdfLaTeX fails later."""
+    """Catch invalid or paper-only Tex/MathTex before pdfLaTeX/QA fails later."""
     tree = ast.parse(code)
+    forbidden = (
+        "\\cite",
+        "\\bibitem",
+        "\\bibliography",
+        "\\begin{thebibliography}",
+        "\\end{thebibliography}",
+    )
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not _is_tex_call(node):
             continue
         for arg in node.args:
             value = _literal_string(arg)
-            if value and not value.isascii():
+            if not value:
+                continue
+            lowered = value.lower()
+            if any(token.lower() in lowered for token in forbidden):
+                return SandboxResult(
+                    success=False,
+                    error_type="runtime_error",
+                    traceback=(
+                        "Invalid Manim LaTeX source: Tex/MathTex contains bibliography "
+                        f"or citation markup: {value!r}\n"
+                        "Rendered explainer scenes must not include paper citations, "
+                        "bibliography commands, or reference fragments. Replace them "
+                        "with a short visual label or remove them."
+                    ),
+                )
+            if not value.isascii():
                 return SandboxResult(
                     success=False,
                     error_type="runtime_error",
