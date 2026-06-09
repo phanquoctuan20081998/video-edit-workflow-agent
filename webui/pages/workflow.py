@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import streamlit as st
+from webui.storage import load_projects
 
 
 _STAGES = [
@@ -147,18 +148,27 @@ def _pipeline_html(statuses: list[str]) -> str:
     """
 
 
-def render() -> None:
-    st.title("Pipeline Workflow")
-    st.caption("Live view of the 6-stage video production pipeline.")
-
+@st.fragment(run_every=3)
+def _live_pipeline() -> None:
     proj = st.session_state.get("current_project")
-    project_status = proj.get("status") if proj else None
+    if not proj:
+        return
+
+    pid = proj.get("project_id", "")
+
+    # Re-read status from storage so we catch updates from background workers
+    projects = load_projects()
+    fresh = next((p for p in projects if p["project_id"] == pid), None)
+    project_status = (fresh or proj).get("status")
+
+    # Sync session state if status changed
+    if fresh and fresh.get("status") != proj.get("status"):
+        st.session_state["current_project"]["status"] = fresh["status"]
 
     statuses = _derive_statuses(project_status)
     import streamlit.components.v1 as components
     components.html(_pipeline_html(statuses), height=220, scrolling=False)
 
-    # ── Status legend ─────────────────────────────────────────────────────────
     st.markdown("")
     leg_cols = st.columns(4)
     leg_cols[0].markdown("⬜ **Pending**")
@@ -168,7 +178,6 @@ def render() -> None:
 
     st.divider()
 
-    # ── Per-stage detail cards ────────────────────────────────────────────────
     st.subheader("Stage Details")
     cols = st.columns(3)
     for i, (stage, status) in enumerate(zip(_STAGES, statuses)):
@@ -183,17 +192,25 @@ def render() -> None:
 
     st.divider()
 
-    # ── Quick navigation ──────────────────────────────────────────────────────
     st.subheader("Quick Navigate")
     nav_cols = st.columns(3)
     nav_cols[0].info("**Topic Search** → Stage 1  \nRun market search, view history, pick a topic.")
     nav_cols[1].info("**Script** → Stage 2  \nGenerate & edit VideoSpec with scenes and beats.")
     nav_cols[2].info("**Scene QA** → Stage 3  \nRun Manim codegen, review renders, pick best variant.")
 
+    st.success(
+        f"Active project: **{proj.get('topic', '—')}** "
+        f"({proj.get('language','').upper()}) — status: **{project_status or '—'}**"
+    )
+
+
+def render() -> None:
+    st.title("Pipeline Workflow")
+    st.caption("Live view of the 6-stage video production pipeline. Auto-refreshes every 3s.")
+
+    proj = st.session_state.get("current_project")
     if not proj:
         st.warning("No active project. Go to **Projects** to create or load one.")
-    else:
-        st.success(
-            f"Active project: **{proj.get('topic', '—')}** "
-            f"({proj.get('language','').upper()}) — status: **{project_status or '—'}**"
-        )
+        return
+
+    _live_pipeline()
