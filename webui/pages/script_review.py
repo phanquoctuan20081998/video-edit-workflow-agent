@@ -1,8 +1,16 @@
-"""Stage 2 — Script review: generate VideoSpec, history, edit and select."""
+"""Stage 2 — Script review: generate VideoSpec, history, edit and select.
+
+Background-task pattern mirrors topic_review.py:
+  - Script generation runs in a daemon thread.
+  - Results stored in @st.cache_resource dict (survives page navigation).
+  - Page polls and re-runs until done.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
+import time
+import uuid
 from datetime import datetime
 
 import streamlit as st
@@ -13,18 +21,42 @@ from webui.storage import load_scripts, load_script, save_script, save_project
 _VISUAL_TYPES = ["manim", "chart", "title_card", "stock", "static_image"]
 
 
+# ── Background task store ─────────────────────────────────────────────────────
+
+@st.cache_resource
+def _script_store() -> dict:
+    return {}
+
+
+@st.cache_resource
+def _script_executor() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="script_gen")
+
+
+def _start_script_task(run_key: str, topic: str, language: str) -> None:
+    store = _script_store()
+    store[run_key] = {"status": "running"}
+
+    def _worker():
+        try:
+            import asyncio
+            from app.agents.script import ScriptAgent
+            agent = ScriptAgent()
+            spec = asyncio.run(agent.run(topic=topic, language=language))
+            store[run_key] = {"status": "done", "spec": spec.model_dump()}
+        except Exception as e:
+            store[run_key] = {"status": "error", "error": str(e)}
+
+    _script_executor().submit(_worker)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _fmt_dt(iso: str) -> str:
     try:
         return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return iso[:16]
-
-
-def _generate_script(topic: str, language: str) -> dict:
-    from app.agents.script import ScriptAgent
-    agent = ScriptAgent()
-    spec = asyncio.run(agent.run(topic=topic, language=language))
-    return spec.model_dump()
 
 
 def _build_spec_from_edits(spec_dict: dict, edited_scenes: list[dict]) -> dict:
@@ -61,25 +93,45 @@ def render() -> None:
 
     st.markdown(f"**Topic:** {topic} &nbsp;|&nbsp; **Language:** `{language}`", unsafe_allow_html=True)
 
-    # ── Generate new script ───────────────────────────────────────────────────
-    if st.button("Generate Script", type="primary"):
-        with st.spinner(f"Researching and generating script in **{language}**..."):
-            try:
-                spec_dict = _generate_script(topic, language)
-                if not spec_dict.get("scenes"):
-                    raise ValueError("Script generation completed, but no scenes were returned.")
-                pid = proj.get("project_id", "")
+    # ── Poll running script task ──────────────────────────────────────────────
+    store   = _script_store()
+    run_key = st.session_state.get("script_run_key")
+
+    if run_key and run_key in store:
+        task = store[run_key]
+        if task["status"] == "running":
+            st.info("📝 Script generation running… (you can navigate away and come back)")
+            with st.spinner("Researching and writing scenes..."):
+                time.sleep(1)
+            st.rerun()
+            return
+        elif task["status"] == "done":
+            spec_dict = task["spec"]
+            if not spec_dict.get("scenes"):
+                st.error("Script returned 0 scenes. Try generating again.")
+            else:
+                pid       = proj.get("project_id", "")
                 script_id = save_script(pid, topic, language, spec_dict)
                 save_project(pid, topic, language, "scripted", spec_dict)
-                st.session_state["draft_spec"] = spec_dict
+                st.session_state["draft_spec"]       = spec_dict
                 st.session_state["active_script_id"] = script_id
                 if "current_project" in st.session_state:
                     st.session_state["current_project"]["status"] = "scripted"
-                st.rerun()
-            except Exception as e:
-                st.session_state.pop("draft_spec", None)
-                st.error(f"Script generation failed: {e}")
-                return
+            del store[run_key]
+            st.session_state.pop("script_run_key", None)
+            st.rerun()
+            return
+        elif task["status"] == "error":
+            st.error(f"Script generation failed: {task['error']}")
+            del store[run_key]
+            st.session_state.pop("script_run_key", None)
+
+    # ── Generate button ───────────────────────────────────────────────────────
+    if st.button("Generate Script", type="primary"):
+        key = str(uuid.uuid4())[:8]
+        st.session_state["script_run_key"] = key
+        _start_script_task(key, topic, language)
+        st.rerun()
 
     st.divider()
 

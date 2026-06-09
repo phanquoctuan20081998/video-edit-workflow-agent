@@ -1,6 +1,7 @@
 """Streamlit HITL UI — topic → script → scene QA → final render."""
 
 import sys
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -19,97 +20,221 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Hide default Streamlit page nav */
     [data-testid="stSidebarNav"] { display: none; }
 
-    /* Sidebar project badge */
-    .project-badge {
-        background: #1e2130;
-        border: 1px solid #374151;
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin-bottom: 12px;
-        font-size: 13px;
-    }
-    .project-badge .label {
-        color: #6b7280;
+    .proj-header {
         font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #6b7280;
+        margin-bottom: 4px;
+    }
+    .proj-status {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 7px;
+        border-radius: 8px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
+        margin-top: 4px;
     }
-    .project-badge .value {
-        color: #e5e7eb;
-        font-weight: 600;
-        margin-top: 2px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .status-chip {
-        display: inline-block;
-        font-size: 11px;
-        font-weight: 600;
-        padding: 2px 8px;
-        border-radius: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-    }
+    .status-searched   { background:#1e3a5f; color:#93c5fd; }
+    .status-scripted   { background:#3b1f6e; color:#c4b5fd; }
+    .status-approved   { background:#0e3a2e; color:#6ee7b7; }
+    .status-animated   { background:#451a03; color:#fcd34d; }
+    .status-voiced     { background:#1a2e1a; color:#86efac; }
+    .status-composited { background:#1e1a45; color:#a5b4fc; }
+    .status-rendered   { background:#052e16; color:#4ade80; }
 </style>
 """, unsafe_allow_html=True)
 
 from webui.state import hydrate_session_state
+from webui.storage import load_projects, save_project, load_project_spec
 
 hydrate_session_state(st.session_state)
 
-PAGES = {
-    "🔄  Workflow":        "webui/pages/workflow.py",
-    "📁  Projects":        "webui/pages/projects.py",
-    "Topic Review":        "webui/pages/topic_review.py",
-    "Script Review":       "webui/pages/script_review.py",
-    "Scene QA":            "webui/pages/scene_review.py",
-    "Voiceover + Render":  "webui/pages/final_render.py",
+_LANG_OPTIONS = ["en", "vi", "ja", "zh", "ko", "fr", "de", "es"]
+
+_STATUS_CSS = {
+    "searched": "status-searched", "scripted": "status-scripted",
+    "approved": "status-approved", "animated": "status-animated",
+    "voiced": "status-voiced", "composited": "status-composited",
+    "rendered": "status-rendered",
 }
 
-st.sidebar.title("🎬 Video Agent")
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
-current_spec = st.session_state.get("approved_spec") or st.session_state.get("draft_spec")
-if current_spec:
-    from app.models.video_spec import VideoSpec
-    from webui.state import save_spec
+with st.sidebar:
+    st.markdown("## 🎬 Video Agent")
+    st.divider()
 
-    spec = VideoSpec.model_validate(current_spec)
-    st.sidebar.markdown(f"""
-    <div class="project-badge">
-        <div class="label">Active Project</div>
-        <div class="value">{spec.topic[:40]}</div>
-        <div style="margin-top:4px; color:#6b7280; font-size:11px;">
-            {spec.language.upper()} &nbsp;·&nbsp; {spec.status}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    if st.sidebar.button("Save current project", key="save_current_project"):
-        save_spec(spec)
-        st.sidebar.success("Saved")
+    # ── Project selector ──────────────────────────────────────────────────────
+    st.markdown('<div class="proj-header">Project</div>', unsafe_allow_html=True)
 
-st.sidebar.markdown("---")
+    projects = load_projects()
+    current_pid = (st.session_state.get("current_project") or {}).get("project_id", "")
 
-pending_stage = st.session_state.pop("pending_stage_nav", None)
-if pending_stage in PAGES:
-    st.session_state["stage_nav"] = pending_stage
+    proj_labels = ["＋ New project"] + [p["topic"][:32] for p in projects]
+    proj_ids    = [None]              + [p["project_id"]  for p in projects]
 
-page = st.sidebar.radio("Stage", list(PAGES.keys()), key="stage_nav")
+    current_idx = next(
+        (i + 1 for i, p in enumerate(projects) if p["project_id"] == current_pid),
+        0,
+    )
 
-st.sidebar.divider()
-st.sidebar.caption("Video Agent · v0.1")
+    selected_idx = st.selectbox(
+        "project_select",
+        range(len(proj_labels)),
+        format_func=lambda i: proj_labels[i],
+        index=current_idx,
+        label_visibility="collapsed",
+        key="project_selector",
+    )
+
+    selected_pid = proj_ids[selected_idx]
+
+    # ── New project form ──────────────────────────────────────────────────────
+    if selected_pid is None:
+        with st.form("new_project_form", clear_on_submit=True):
+            new_topic = st.text_input("Topic", placeholder="e.g. Fast Fourier Transform")
+            new_lang  = st.selectbox("Language", _LANG_OPTIONS)
+            if st.form_submit_button("Create", type="primary") and new_topic.strip():
+                pid = str(uuid.uuid4())
+                save_project(pid, new_topic.strip(), new_lang, "searched")
+                st.session_state["current_project"] = {
+                    "project_id": pid,
+                    "topic": new_topic.strip(),
+                    "language": new_lang,
+                    "status": "searched",
+                }
+                st.session_state["approved_topic"] = new_topic.strip()
+                st.session_state["language"] = new_lang
+                st.rerun()
+
+    # ── Load project when selection changes ───────────────────────────────────
+    elif selected_pid != current_pid:
+        proj_data = next(p for p in projects if p["project_id"] == selected_pid)
+        spec = load_project_spec(selected_pid)
+        st.session_state["current_project"] = {
+            "project_id": selected_pid,
+            "topic": proj_data["topic"],
+            "language": proj_data.get("language", "en"),
+            "status": proj_data.get("status", "searched"),
+        }
+        st.session_state["approved_topic"] = proj_data["topic"]
+        st.session_state["language"] = proj_data.get("language", "en")
+        if spec:
+            st.session_state["draft_spec"]    = spec
+            st.session_state["approved_spec"] = spec
+        else:
+            st.session_state.pop("draft_spec", None)
+            st.session_state.pop("approved_spec", None)
+        st.rerun()
+
+    # ── Show current project info + edit ─────────────────────────────────────
+    else:
+        proj_meta = next((p for p in projects if p["project_id"] == current_pid), None)
+        if proj_meta:
+            status     = proj_meta.get("status", "searched")
+            status_cls = _STATUS_CSS.get(status, "status-searched")
+            st.markdown(
+                f'<span class="proj-status {status_cls}">{status}</span> '
+                f'<span style="font-size:11px;color:#9ca3af">{proj_meta.get("language","").upper()}'
+                f' · {proj_meta.get("scene_count",0)} scenes</span>',
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("✏️ Edit project"):
+            with st.form("edit_project_form"):
+                edit_topic = st.text_input(
+                    "Topic",
+                    value=(proj_meta or {}).get("topic", ""),
+                )
+                edit_lang = st.selectbox(
+                    "Language",
+                    _LANG_OPTIONS,
+                    index=_LANG_OPTIONS.index(
+                        (proj_meta or {}).get("language", "en")
+                        if (proj_meta or {}).get("language", "en") in _LANG_OPTIONS
+                        else "en"
+                    ),
+                )
+                col_save, col_del = st.columns(2)
+                save_edit = col_save.form_submit_button("Save", type="primary")
+                delete    = col_del.form_submit_button("Delete", type="secondary")
+
+            if save_edit and edit_topic.strip():
+                spec_dict = load_project_spec(current_pid)
+                save_project(current_pid, edit_topic.strip(), edit_lang, status, spec_dict)
+                st.session_state["current_project"]["topic"]    = edit_topic.strip()
+                st.session_state["current_project"]["language"] = edit_lang
+                st.session_state["approved_topic"] = edit_topic.strip()
+                st.session_state["language"] = edit_lang
+                st.rerun()
+
+            if delete:
+                # Remove from projects list
+                import json
+                from webui.storage import DATA_DIR
+                proj_file = DATA_DIR / "projects.json"
+                if proj_file.exists():
+                    all_p = json.loads(proj_file.read_text(encoding="utf-8"))
+                    all_p = [p for p in all_p if p["project_id"] != current_pid]
+                    proj_file.write_text(json.dumps(all_p, ensure_ascii=False, indent=2), encoding="utf-8")
+                st.session_state.pop("current_project", None)
+                st.session_state.pop("approved_topic", None)
+                st.session_state.pop("draft_spec", None)
+                st.session_state.pop("approved_spec", None)
+                st.rerun()
+
+        # Save button
+        current_spec = st.session_state.get("approved_spec") or st.session_state.get("draft_spec")
+        if current_spec:
+            from webui.state import save_spec
+            from app.models.video_spec import VideoSpec
+            if st.button("💾 Save", key="sidebar_save"):
+                save_spec(VideoSpec.model_validate(current_spec))
+                st.success("Saved")
+
+    st.divider()
+
+    # ── Stage navigation (only when a project is active) ─────────────────────
+    PAGES = {
+        "🔄  Workflow":       "workflow",
+        "🔍  Topic Search":   "topic_review",
+        "📝  Script":         "script_review",
+        "🎬  Scene QA":       "scene_review",
+        "🔊  Voiceover":      "final_render",
+    }
+
+    if current_pid or selected_pid:
+        pending_stage = st.session_state.pop("pending_stage_nav", None)
+        if pending_stage in PAGES:
+            st.session_state["stage_nav"] = pending_stage
+
+        page = st.radio(
+            "Stage",
+            list(PAGES.keys()),
+            key="stage_nav",
+            label_visibility="collapsed",
+        )
+    else:
+        page = None
+        st.caption("Select or create a project above.")
+
+    st.divider()
+    st.caption("Video Agent · v0.1")
 
 # ── Route ─────────────────────────────────────────────────────────────────────
 
-if "Workflow" in page:
+if page is None:
+    st.title("🎬 Video Agent")
+    st.info("Create or select a project in the sidebar to get started.")
+
+elif "Workflow" in page:
     from webui.pages import workflow
     workflow.render()
-elif "Projects" in page:
-    from webui.pages import projects
-    projects.render()
 elif "Topic" in page:
     from webui.pages import topic_review
     topic_review.render()
@@ -119,6 +244,6 @@ elif "Script" in page:
 elif "Scene" in page:
     from webui.pages import scene_review
     scene_review.render()
-elif page == "Voiceover + Render":
+elif "Voiceover" in page:
     from webui.pages import final_render
     final_render.render()

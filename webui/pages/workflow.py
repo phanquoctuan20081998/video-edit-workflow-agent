@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 _STAGES = [
@@ -79,8 +78,6 @@ def _pipeline_html(statuses: list[str]) -> str:
 
     return f"""
     <style>
-      * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-      body {{ background: transparent; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
       .pipeline {{
         display: flex;
         align-items: center;
@@ -158,7 +155,7 @@ def render() -> None:
     project_status = proj.get("status") if proj else None
 
     statuses = _derive_statuses(project_status)
-    components.html(_pipeline_html(statuses), height=200, scrolling=False)
+    st.markdown(_pipeline_html(statuses), unsafe_allow_html=True)
 
     # ── Status legend ─────────────────────────────────────────────────────────
     st.markdown("")

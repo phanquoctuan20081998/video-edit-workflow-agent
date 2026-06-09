@@ -1,8 +1,17 @@
-"""Stage 1 — Topic review: market search with interest prompt and run history."""
+"""Stage 1 — Topic review: market search with interest prompt and run history.
+
+Background-task pattern:
+  - Search runs in a daemon thread via ThreadPoolExecutor.
+  - Results land in a @st.cache_resource dict (survives page navigation).
+  - On every render the page polls the store; if still running it sleeps 1s
+    then calls st.rerun() so the spinner stays visible across navigation.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
+import time
+import uuid
 from datetime import datetime
 
 import streamlit as st
@@ -13,6 +22,54 @@ from webui.storage import load_topic_searches, save_topic_search, save_project
 _LANG_OPTIONS = ["en", "vi", "ja", "zh", "ko", "fr", "de", "es"]
 
 
+# ── Background task store (survives navigation within the session) ────────────
+
+@st.cache_resource
+def _task_store() -> dict:
+    """Module-level singleton: {run_key: {"status": running|done|error, ...}}"""
+    return {}
+
+
+@st.cache_resource
+def _executor() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="market_search")
+
+
+def _start_search(run_key: str, prompt: str, n_topics: int) -> None:
+    store = _task_store()
+    store[run_key] = {"status": "running", "prompt": prompt}
+
+    def _worker():
+        try:
+            from app.agents.market_search import MarketSearchAgent
+            import asyncio
+            agent = MarketSearchAgent()
+            candidates = asyncio.run(agent.search(
+                n_topics=n_topics,
+                interest_prompt=prompt or None,
+            ))
+            result = [
+                {
+                    "title":     c.title,
+                    "source":    c.source,
+                    "trending":  c.trending_score,
+                    "visual":    c.visualizable_score,
+                    "composite": c.composite_score,
+                    "difficulty": c.difficulty,
+                    "approach":  c.approach,
+                    "url":       c.source_url,
+                }
+                for c in candidates
+            ]
+            store[run_key] = {"status": "done", "prompt": prompt, "candidates": result}
+        except Exception as e:
+            store[run_key] = {"status": "error", "prompt": prompt, "error": str(e)}
+
+    _executor().submit(_worker)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _fmt_dt(iso: str) -> str:
     try:
         return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M")
@@ -20,60 +77,70 @@ def _fmt_dt(iso: str) -> str:
         return iso[:16]
 
 
-def _run_search(prompt: str, n_topics: int) -> list[dict]:
-    from app.agents.market_search import MarketSearchAgent
-    agent = MarketSearchAgent()
-    candidates = asyncio.run(agent.search(n_topics=n_topics, interest_prompt=prompt or None))
-    return [
-        {
-            "title":     c.title,
-            "source":    c.source,
-            "trending":  c.trending_score,
-            "visual":    c.visualizable_score,
-            "composite": c.composite_score,
-            "difficulty": c.difficulty,
-            "approach":  c.approach,
-            "url":       c.source_url,
-        }
-        for c in candidates
-    ]
-
-
 def _render_candidates(candidates: list[dict], key_prefix: str) -> None:
+    cols = st.columns([4, 1, 1, 1, 1])
+    cols[0].caption("Topic")
+    cols[1].caption("Trend")
+    cols[2].caption("Visual")
+    cols[3].caption("Difficulty")
+
     selected_idx = st.session_state.get("selected_topic_idx")
-
-    header = st.columns([4, 1, 1, 1, 1])
-    header[0].caption("Topic")
-    header[1].caption("Trend")
-    header[2].caption("Visual")
-    header[3].caption("Difficulty")
-
     for i, c in enumerate(candidates):
         is_sel = (i == selected_idx)
-        cols = st.columns([4, 1, 1, 1, 1])
+        row = st.columns([4, 1, 1, 1, 1])
         label = f"{'✓ ' if is_sel else ''}{c['title']}"
-        cols[0].markdown(f"**{label}**" if is_sel else label)
-        cols[1].markdown(f"`{c['trending']:.1f}`")
-        cols[2].markdown(f"`{c['visual']:.1f}`")
-        cols[3].caption(c["difficulty"])
-        if cols[4].button("Select", key=f"{key_prefix}_sel_{i}"):
+        row[0].markdown(f"**{label}**" if is_sel else label)
+        row[1].markdown(f"`{c['trending']:.1f}`")
+        row[2].markdown(f"`{c['visual']:.1f}`")
+        row[3].caption(c["difficulty"])
+        if row[4].button("Select", key=f"{key_prefix}_sel_{i}"):
             st.session_state["selected_topic_idx"] = i
             st.session_state["topic_candidates"] = candidates
             st.rerun()
 
 
+# ── Main render ───────────────────────────────────────────────────────────────
+
 def render() -> None:
     st.title("Stage 1 — Topic Search")
 
+    store   = _task_store()
+    run_key = st.session_state.get("search_run_key")
+
+    # ── Poll running task ─────────────────────────────────────────────────────
+    if run_key and run_key in store:
+        task = store[run_key]
+
+        if task["status"] == "running":
+            st.info("🔍 Market search running… (you can navigate away and come back)")
+            with st.spinner("Fetching and scoring topics..."):
+                time.sleep(1)
+            st.rerun()
+            return
+
+        elif task["status"] == "done":
+            candidates = task["candidates"]
+            st.session_state["topic_candidates"] = candidates
+            st.session_state["selected_topic_idx"] = None
+            save_topic_search(task.get("prompt", ""), candidates)
+            del store[run_key]
+            st.session_state.pop("search_run_key", None)
+            st.rerun()
+            return
+
+        elif task["status"] == "error":
+            st.error(f"Search failed: {task['error']}")
+            del store[run_key]
+            st.session_state.pop("search_run_key", None)
+
     # ── Interest prompt ───────────────────────────────────────────────────────
     st.subheader("Topic Interests")
-    st.caption(
-        "Describe what topics you're interested in. The market search will bias results toward these areas."
-    )
+    st.caption("Describe your interests — market search biases results toward these areas.")
+
     interest_prompt = st.text_area(
         "Interest prompt",
         value=st.session_state.get("interest_prompt", ""),
-        placeholder="e.g. I want topics about linear algebra, neural network theory, or quantum computing.",
+        placeholder="e.g. I want topics about linear algebra, neural networks, or quantum computing.",
         height=90,
         label_visibility="collapsed",
     )
@@ -84,15 +151,10 @@ def render() -> None:
     language = col2.selectbox("Language", _LANG_OPTIONS, index=0, key="search_language")
 
     if col3.button("🔍 Run Market Search", type="primary"):
-        with st.spinner("Searching trending math/physics topics..."):
-            try:
-                candidates = _run_search(interest_prompt, int(n_topics))
-                st.session_state["topic_candidates"] = candidates
-                st.session_state["selected_topic_idx"] = None
-                save_topic_search(interest_prompt, candidates)
-            except Exception as e:
-                st.error(f"Search failed: {e}")
-                return
+        key = str(uuid.uuid4())[:8]
+        st.session_state["search_run_key"] = key
+        _start_search(key, interest_prompt, int(n_topics))
+        st.rerun()
 
     st.divider()
 
@@ -111,7 +173,7 @@ def render() -> None:
                     st.session_state["selected_topic_idx"] = None
                     st.rerun()
 
-    # ── Current results ───────────────────────────────────────────────────────
+    # ── Results ───────────────────────────────────────────────────────────────
     candidates = st.session_state.get("topic_candidates", [])
     if not candidates:
         st.info("Run a market search above, or load a previous run from history.")
@@ -120,7 +182,7 @@ def render() -> None:
     st.subheader(f"Results — {len(candidates)} topics")
     _render_candidates(candidates, key_prefix="curr")
 
-    # ── Topic selection & approval ────────────────────────────────────────────
+    # ── Topic approval ────────────────────────────────────────────────────────
     selected_idx = st.session_state.get("selected_topic_idx")
     if selected_idx is not None:
         c = candidates[selected_idx]
@@ -136,14 +198,16 @@ def render() -> None:
             unsafe_allow_html=True,
         )
 
-        custom = st.text_input("Or enter a custom topic:", "", key="custom_topic")
+        custom     = st.text_input("Or enter a custom topic:", "", key="custom_topic")
         final_topic = custom.strip() if custom.strip() else c["title"]
-        final_lang  = st.selectbox("Language for this project", _LANG_OPTIONS,
-                                   index=_LANG_OPTIONS.index(language), key="final_lang")
+        final_lang  = st.selectbox(
+            "Language for this project", _LANG_OPTIONS,
+            index=_LANG_OPTIONS.index(language) if language in _LANG_OPTIONS else 0,
+            key="final_lang",
+        )
 
         if st.button("Approve → Start Scripting", type="primary"):
-            import uuid
-            pid = st.session_state.get("current_project", {}).get("project_id") or str(uuid.uuid4())
+            pid = (st.session_state.get("current_project") or {}).get("project_id") or str(uuid.uuid4())
             save_project(pid, final_topic, final_lang, "searched")
             st.session_state["current_project"] = {
                 "project_id": pid,
