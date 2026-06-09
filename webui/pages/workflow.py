@@ -15,31 +15,39 @@ _STAGES = [
     {"num": 6, "name": "Render",        "desc": "Final encode",           "hitl": False, "key": "render"},
 ]
 
-_STATUS_ORDER = ["searched", "scripted", "approved", "animated", "voiced", "composited", "rendered"]
-
 _STATUS_TO_STAGE = {
-    "searched":   1,
-    "scripted":   2,
-    "approved":   2,
-    "animated":   3,
-    "voiced":     4,
-    "composited": 5,
-    "rendered":   6,
+    "searching":   1,
+    "searched":    1,
+    "scripting":   2,
+    "scripted":    2,
+    "approved":    2,
+    "animating":   3,
+    "animated":    3,
+    "voicing":     4,
+    "voiced":      4,
+    "compositing": 5,
+    "composited":  5,
+    "rendering":   6,
+    "rendered":    6,
+}
+
+_ACTIVE_STATUSES = {
+    "searching", "scripting", "animating", "voicing", "compositing", "rendering",
 }
 
 
 def _derive_statuses(project_status: str | None) -> list[str]:
-    """Return per-stage status strings based on current project status."""
     if not project_status:
         return ["pending"] * 6
 
-    active_idx = _STATUS_TO_STAGE.get(project_status, 0)
+    stage = _STATUS_TO_STAGE.get(project_status, 0)
+    is_active = project_status in _ACTIVE_STATUSES
     statuses = []
     for i in range(1, 7):
-        if i < active_idx:
+        if i < stage:
             statuses.append("done")
-        elif i == active_idx:
-            statuses.append("running")
+        elif i == stage:
+            statuses.append("running" if is_active else "done")
         else:
             statuses.append("pending")
     return statuses

@@ -9,6 +9,7 @@ Background-task pattern mirrors topic_review.py:
 from __future__ import annotations
 
 import concurrent.futures
+import time
 import uuid
 from datetime import datetime
 
@@ -37,22 +38,28 @@ def _script_running_poll(run_key: str) -> None:
     store = _script_store()
     task = store.get(run_key, {})
     if task.get("status") == "running":
-        st.info("📝 Script generation running… (you can navigate away and come back)")
-        st.caption("⏳ Researching and writing scenes...")
+        elapsed = int(time.monotonic() - task.get("started_at", time.monotonic()))
+        st.info(f"📝 Script generation running… ({elapsed}s elapsed)")
+        for msg in task.get("log", []):
+            st.caption(f"▸ {msg}")
     else:
         st.rerun()
 
 
 def _start_script_task(run_key: str, topic: str, language: str) -> None:
     store = _script_store()
-    store[run_key] = {"status": "running"}
+    store[run_key] = {"status": "running", "log": [], "started_at": time.monotonic()}
 
     def _worker():
         try:
             import asyncio
             from app.agents.script import ScriptAgent
+            store[run_key]["log"].append("Initializing script agent…")
             agent = ScriptAgent()
+            store[run_key]["log"].append(f"Researching topic: {topic!r}…")
             spec = asyncio.run(agent.run(topic=topic, language=language))
+            store[run_key]["log"].append(f"Writing scenes ({language})…")
+            store[run_key]["log"].append(f"Generated {len(spec.scenes)} scenes with beats")
             store[run_key] = {"status": "done", "spec": spec.model_dump()}
         except Exception as e:
             store[run_key] = {"status": "error", "error": str(e)}
@@ -137,6 +144,10 @@ def render() -> None:
     if st.button("Generate Script", type="primary"):
         key = str(uuid.uuid4())[:8]
         st.session_state["script_run_key"] = key
+        pid = proj.get("project_id", "")
+        if pid:
+            save_project(pid, topic, language, "scripting")
+            st.session_state["current_project"]["status"] = "scripting"
         _start_script_task(key, topic, language)
         st.rerun()
 
@@ -240,4 +251,5 @@ def render() -> None:
         from webui.state import save_spec
         from app.models.video_spec import VideoSpec as _VS
         save_spec(_VS.model_validate(updated))
-        st.success(f"Script approved. {len(edited_scenes)} scenes queued for animation.")
+        st.session_state["pending_stage_nav"] = "🎬  Scene QA"
+        st.rerun()
