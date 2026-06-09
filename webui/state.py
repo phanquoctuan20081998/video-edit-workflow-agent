@@ -21,6 +21,10 @@ def load_latest_spec() -> VideoSpec | None:
 
 
 def hydrate_session_state(session_state) -> None:
+    # Project already selected this session — never overwrite with DB data.
+    if session_state.get("current_project"):
+        return
+    # Already hydrated without a project (e.g. first run, no DB yet).
     if session_state.get("draft_spec") or session_state.get("approved_spec"):
         return
 
@@ -32,6 +36,13 @@ def hydrate_session_state(session_state) -> None:
     session_state["draft_spec"] = spec_dict
     session_state["approved_topic"] = spec.topic
     session_state["language"] = spec.language
+    # Restore current_project so sidebar shows the right project after F5.
+    session_state["current_project"] = {
+        "project_id": spec.project_id,
+        "topic": spec.topic,
+        "language": spec.language,
+        "status": spec.status.value,
+    }
     if spec.status.value in {"approved", "animated", "voiced", "composited", "rendered"}:
         session_state["approved_spec"] = spec_dict
 
