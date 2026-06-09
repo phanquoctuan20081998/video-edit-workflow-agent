@@ -13,8 +13,9 @@ from app.providers.base import LLMMessage, LLMProvider, LLMResponse
 log = structlog.get_logger()
 
 _RETRYABLE_CODES = {429, 500, 502, 503, 504}
-_RETRY_DELAYS = [5, 20, 60]   # seconds between attempts 1→2, 2→3, 3→4
-_TIMEOUT = 300.0               # 5 min — enough for 8 000-token completions
+_RETRY_DELAYS     = [10, 40, 90]    # 5xx backoff: fast enough for transient errors
+_RETRY_DELAYS_429 = [65, 130, 260]  # 429 backoff: free tier resets ~60s
+_TIMEOUT = 300.0                    # 5 min — enough for 8 000-token completions
 
 
 class OpenRouterProvider(LLMProvider):
@@ -28,15 +29,20 @@ class OpenRouterProvider(LLMProvider):
 
     async def _post_with_retry(self, payload: dict) -> dict:
         last_exc: Exception | None = None
-        for attempt, delay in enumerate([0] + _RETRY_DELAYS):
-            if delay:
-                log.warning("openrouter.retry", attempt=attempt, wait_sec=delay)
+        last_status: int = 0
+        max_attempts = len(_RETRY_DELAYS) + 1
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                delays = _RETRY_DELAYS_429 if last_status == 429 else _RETRY_DELAYS
+                delay = delays[attempt - 1]
+                log.warning("openrouter.retry", attempt=attempt, wait_sec=delay, prev_status=last_status)
                 await asyncio.sleep(delay)
             try:
                 async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                     resp = await client.post(self._endpoint, json=payload, headers=self._headers())
                     if resp.status_code in _RETRYABLE_CODES:
                         log.warning("openrouter.http_error", status=resp.status_code, attempt=attempt)
+                        last_status = resp.status_code
                         last_exc = httpx.HTTPStatusError(
                             f"HTTP {resp.status_code}", request=resp.request, response=resp
                         )

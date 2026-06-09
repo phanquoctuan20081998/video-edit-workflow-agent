@@ -41,6 +41,14 @@ def _scene_executor() -> concurrent.futures.ThreadPoolExecutor:
     return concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="manim_codegen")
 
 
+def _log_terminal(lines: list[str], max_lines: int = 60) -> None:
+    """Render last N log lines as a dark terminal block."""
+    if not lines:
+        return
+    visible = lines[-max_lines:]
+    st.code("\n".join(visible), language=None)
+
+
 @st.fragment(run_every=3)
 def _run_all_poll(run_key: str) -> None:
     store = _scene_store()
@@ -48,8 +56,10 @@ def _run_all_poll(run_key: str) -> None:
     if task.get("status") == "running":
         elapsed = int(time.monotonic() - task.get("started_at", time.monotonic()))
         st.info(f"🎬 Manim codegen running… ({elapsed}s elapsed)")
-        for msg in task.get("log", []):
-            st.caption(f"▸ {msg}")
+        log_lines = task.get("log", [])
+        if log_lines:
+            with st.expander(f"Agent log ({len(log_lines)} lines)", expanded=True):
+                _log_terminal(log_lines)
     else:
         st.rerun()
 
@@ -67,8 +77,10 @@ def _regen_banner(running_scene_ids: tuple) -> None:
             any_running = True
             elapsed = int(time.monotonic() - task.get("started_at", time.monotonic()))
             st.info(f"⏳ Re-generating **{sid}**… ({elapsed}s elapsed)")
-            for msg in task.get("log", []):
-                st.caption(f"▸ {msg}")
+            log_lines = task.get("log", [])
+            if log_lines:
+                with st.expander(f"Agent log — {sid} ({len(log_lines)} lines)", expanded=True):
+                    _log_terminal(log_lines)
     if not any_running:
         st.rerun()
 
@@ -77,16 +89,30 @@ def _submit_render_all(run_key: str, spec_dict: dict, pid: str, max_repairs: int
     store = _scene_store()
     store[run_key] = {"status": "running", "log": [], "started_at": time.monotonic()}
 
+    def _append_log(msg: str) -> None:
+        store[run_key]["log"].append(msg)
+
+    def _progress_cb(scene_id: str, status: str) -> None:
+        _append_log(f"[{scene_id}] ▶ {status}")
+
     def _worker():
         try:
             from app.agents.manim_codegen import run_manim_codegen
             from app.models.video_spec import VideoSpec
-            store[run_key]["log"].append("Starting Manim codegen for all scenes…")
+            _append_log("Starting Manim codegen for all scenes…")
             spec = VideoSpec.model_validate(spec_dict)
-            result_spec = asyncio.run(run_manim_codegen(spec, max_repairs=max_repairs))
-            store[run_key]["log"].append(f"Completed {len(result_spec.scenes)} scenes")
+            result_spec = asyncio.run(
+                run_manim_codegen(
+                    spec,
+                    max_repairs=max_repairs,
+                    progress_cb=_progress_cb,
+                    log_cb=_append_log,
+                )
+            )
+            _append_log(f"✅ Completed {len(result_spec.scenes)} scenes")
             store[run_key] = {"status": "done", "spec_dict": result_spec.model_dump(), "pid": pid}
         except Exception as e:
+            _append_log(f"❌ Error: {e}")
             store[run_key] = {"status": "error", "error": str(e)}
 
     _scene_executor().submit(_worker)
@@ -96,18 +122,34 @@ def _submit_render_one(run_key: str, scene_id: str, spec_dict: dict, pid: str, m
     store = _scene_store()
     store[run_key] = {"status": "running", "log": [], "started_at": time.monotonic()}
 
+    def _append_log(msg: str) -> None:
+        store[run_key]["log"].append(msg)
+
+    def _progress_cb(sid: str, status: str) -> None:
+        _append_log(f"[{sid}] ▶ {status}")
+
     def _worker():
         try:
             from app.agents.manim_codegen import render_scene
             from app.models.video_spec import VideoSpec
-            store[run_key]["log"].append(f"Re-generating {scene_id}…")
+            _append_log(f"Re-generating {scene_id}…")
             spec = VideoSpec.model_validate(spec_dict)
             scene = next(s for s in spec.scenes if s.id == scene_id)
             scene.manim_code = None
             scene.manim_code_hash = None
-            asyncio.run(render_scene(scene, spec, max_repairs=max_repairs))
+            asyncio.run(
+                render_scene(
+                    scene,
+                    spec,
+                    max_repairs=max_repairs,
+                    progress_cb=_progress_cb,
+                    log_cb=_append_log,
+                )
+            )
+            _append_log(f"✅ {scene_id} done")
             store[run_key] = {"status": "done", "spec_dict": spec.model_dump(), "scene_id": scene_id, "pid": pid}
         except Exception as e:
+            _append_log(f"❌ Error: {e}")
             store[run_key] = {"status": "error", "error": str(e)}
 
     _scene_executor().submit(_worker)
