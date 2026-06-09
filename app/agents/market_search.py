@@ -112,11 +112,11 @@ class MarketSearchAgent:
 
         # Run all fetchers concurrently
         results = await asyncio.gather(
-            _fetch_arxiv_topics(),
+            _fetch_arxiv_topics(interest_prompt),
             _fetch_reddit_topics(self._cfg),
-            _fetch_hn_topics(self._llm),
+            _fetch_hn_topics(self._llm, interest_prompt),
             _fetch_google_trends(self._cfg),
-            _fetch_youtube_trends(self._cfg),
+            _fetch_youtube_trends(self._cfg, interest_prompt),
             return_exceptions=True,
         )
         for r in results:
@@ -188,7 +188,7 @@ class MarketSearchAgent:
 
 # ── Source fetchers ────────────────────────────────────────────────────────────
 
-async def _fetch_arxiv_topics() -> list[dict]:
+async def _fetch_arxiv_topics(interest_prompt: str | None = None) -> list[dict]:
     topics = []
     try:
         import arxiv
@@ -208,6 +208,23 @@ async def _fetch_arxiv_topics() -> list[dict]:
                     "url": str(paper.entry_id),
                     "engagement_signal": 0,   # no engagement metric for arXiv
                 })
+        # Direct interest search — adds targeted results when user has a specific interest
+        if interest_prompt and interest_prompt.strip():
+            try:
+                search = arxiv.Search(
+                    query=interest_prompt.strip(),
+                    max_results=8,
+                    sort_by=arxiv.SortCriterion.Relevance,
+                )
+                for paper in client.results(search):
+                    topics.append({
+                        "title": paper.title,
+                        "source": "arxiv",
+                        "url": str(paper.entry_id),
+                        "engagement_signal": 3.0,  # mild signal boost for interest-matched papers
+                    })
+            except Exception as e:
+                log.warning("market_search.arxiv_interest_failed", error=str(e))
         log.info("market_search.arxiv_done", count=len(topics))
     except Exception as e:
         log.warning("market_search.arxiv_failed", error=str(e))
@@ -282,7 +299,7 @@ async def _reddit_public_json(cfg) -> list[dict]:
     return topics
 
 
-async def _fetch_hn_topics(llm) -> list[dict]:
+async def _fetch_hn_topics(llm, interest_prompt: str | None = None) -> list[dict]:
     """Fetch top 50 HN stories, use LLM to classify relevance — no keyword filter."""
     raw: list[dict] = []
     try:
@@ -319,8 +336,12 @@ async def _fetch_hn_topics(llm) -> list[dict]:
     # LLM relevance filter — one batch call, no per-title keyword matching
     titles_json = json.dumps([r["title"] for r in raw])
     try:
+        interest_note = (
+            f"\nPrioritize titles related to: {interest_prompt}\n"
+            if interest_prompt and interest_prompt.strip() else ""
+        )
         resp = await llm.complete(
-            [LLMMessage(role="user", content=_HN_FILTER_PROMPT.format(titles_json=titles_json))],
+            [LLMMessage(role="user", content=_HN_FILTER_PROMPT.format(titles_json=titles_json) + interest_note)],
             system=_HN_FILTER_SYSTEM,
             max_tokens=1024,
             temperature=0.1,
@@ -390,7 +411,7 @@ async def _fetch_google_trends(cfg) -> list[dict]:
     return topics
 
 
-async def _fetch_youtube_trends(cfg) -> list[dict]:
+async def _fetch_youtube_trends(cfg, interest_prompt: str | None = None) -> list[dict]:
     """Trending math/science videos via YouTube Data API v3.
     engagement_signal = inverted rank (top result = highest signal).
     """
@@ -402,6 +423,9 @@ async def _fetch_youtube_trends(cfg) -> list[dict]:
         from googleapiclient.discovery import build
 
         search_terms = [k.strip() for k in cfg.youtube_search_keywords.split(",")]
+        if interest_prompt and interest_prompt.strip():
+            # Prepend interest as an extra search term so it runs first
+            search_terms = [interest_prompt.strip()] + search_terms
 
         def _sync_fetch() -> list[dict]:
             youtube = build("youtube", "v3", developerKey=cfg.youtube_api_key)

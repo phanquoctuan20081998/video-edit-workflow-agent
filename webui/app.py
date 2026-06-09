@@ -62,10 +62,12 @@ from webui.state import hydrate_session_state
 hydrate_session_state(st.session_state)
 
 PAGES = {
-    "Topic Review": "webui/pages/topic_review.py",
-    "Script Review": "webui/pages/script_review.py",
-    "Scene QA": "webui/pages/scene_review.py",
-    "Voiceover + Render": "webui/pages/final_render.py",
+    "🔄  Workflow":        "webui/pages/workflow.py",
+    "📁  Projects":        "webui/pages/projects.py",
+    "Topic Review":        "webui/pages/topic_review.py",
+    "Script Review":       "webui/pages/script_review.py",
+    "Scene QA":            "webui/pages/scene_review.py",
+    "Voiceover + Render":  "webui/pages/final_render.py",
 }
 
 st.sidebar.title("🎬 Video Agent")
@@ -102,7 +104,13 @@ st.sidebar.caption("Video Agent · v0.1")
 
 # ── Route ─────────────────────────────────────────────────────────────────────
 
-if "Topic" in page:
+if "Workflow" in page:
+    from webui.pages import workflow
+    workflow.render()
+elif "Projects" in page:
+    from webui.pages import projects
+    projects.render()
+elif "Topic" in page:
     from webui.pages import topic_review
     topic_review.render()
 elif "Script" in page:
