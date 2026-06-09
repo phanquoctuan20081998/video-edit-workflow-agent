@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from app.config import get_settings
 from app.providers.base import LLMProvider, StockProvider, TTSProvider
 
 
-@lru_cache(maxsize=1)
 def get_llm_provider() -> LLMProvider:
     cfg = get_settings()
     if cfg.llm_provider == "anthropic":
@@ -23,7 +20,6 @@ def get_llm_provider() -> LLMProvider:
     raise ValueError(f"Unknown LLM provider: {cfg.llm_provider!r}")
 
 
-@lru_cache(maxsize=1)
 def get_vision_provider() -> LLMProvider:
     cfg = get_settings()
     if cfg.vision_provider == "anthropic":
@@ -38,7 +34,6 @@ def get_vision_provider() -> LLMProvider:
     raise ValueError(f"Unknown vision provider: {cfg.vision_provider!r}")
 
 
-@lru_cache(maxsize=1)
 def get_tts_provider() -> TTSProvider:
     cfg = get_settings()
     if cfg.tts_provider == "edge":
@@ -54,7 +49,6 @@ def get_tts_provider() -> TTSProvider:
     raise ValueError(f"Unknown TTS provider: {cfg.tts_provider!r}")
 
 
-@lru_cache(maxsize=1)
 def get_stock_provider() -> StockProvider:
     cfg = get_settings()
     from app.providers.stock.pexels_provider import PexelsProvider

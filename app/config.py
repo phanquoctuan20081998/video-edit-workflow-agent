@@ -58,11 +58,5 @@ class Settings(BaseSettings):
     youtube_max_results: int = 10
 
 
-_settings: Settings | None = None
-
-
 def get_settings() -> Settings:
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
+    return Settings()

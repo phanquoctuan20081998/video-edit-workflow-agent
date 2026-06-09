@@ -31,7 +31,7 @@ from app.sandbox.runner import SandboxResult, sandbox_exec
 
 log = structlog.get_logger()
 
-_CODEGEN_MAX_TOKENS = 16000
+_CODEGEN_MAX_TOKENS = 8000
 
 _GENERATE_SYSTEM = """\
 You are an expert Manim Community Edition (CE) developer generating math/physics explainer
@@ -89,6 +89,14 @@ NEVER assign colors arbitrarily. Viewer infers: same color = same concept.
 - Position with to_edge(), next_to(), move_to() — NEVER hardcode .shift(3.14)
 - Margin: nothing within 0.5 units of frame edge (frame = 14.22 × 8.0 units)
 - Max 6–8 objects visible simultaneously. More → split or FadeOut old ones.
+- Prefer a simple 2D schematic over a complex 3D construction when the concept can be
+  taught schematically. A clean morphing boundary beats a cluttered pseudo-3D scene.
+- For color fields, matrices, or dot clouds: include a tiny legend with 2-3 labels, and
+  keep the same notation everywhere. If text says A(x,t), matrix entries must be a_ij.
+- Do not show an equation, a matrix, and prose explanation all at once. Stage them:
+  reveal shape/context, then formula, then matrix/field, then conclusion.
+- If a visual intent says "morphs from X to Y", actually create X first, then Transform
+  it into Y before adding labels or formulas.
 
 ═══ ANIMATION RHYTHM ═══
 This is the most critical rule. Each play() call = one idea.
@@ -113,6 +121,9 @@ Pacing:
 ❌ FadeIn(equation) — use Write(equation)
 ❌ Objects that appear and never interact, move, or change color
 ❌ Random color per object (BLUE, GREEN, RED, ORANGE all in one scene with no meaning)
+❌ Unexplained colored dots, fields, or heat maps
+❌ Notation mismatch such as A(x,t) in prose but b_ij in the displayed matrix
+❌ Dense single-frame summaries with shape + matrix + equation + paragraph together
 ❌ Missing waits between reveals
 ❌ MathTex wider than 10 units (always check .width)
 ❌ Text() for math expressions
@@ -185,6 +196,15 @@ The following Manim CE code rendered successfully but has visual problems. Fix t
 
 === VISUAL PROBLEMS REPORTED ===
 {issues}
+
+Repair strategy:
+- You may restructure the scene, not just patch labels.
+- Remove or split crowded groups until no frame has more than 6-8 visible objects.
+- Replace garbled or risky MathTex with simpler ASCII LaTeX, or with Text labels plus
+  separate MathTex formulas.
+- Keep notation consistent across labels, matrices, and formulas.
+- Add legends for any color-coded dots/fields.
+- If a requested transformation is missing, add it early and make it visually obvious.
 
 Output ONLY the fixed Python source code, no explanations, no markdown fences.
 """
@@ -431,7 +451,8 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
     )
     code = _strip_code_fences(resp.content)
     code = _inject_palette_if_missing(code)
-    return _ensure_scene_subclass(code)
+    code = _ensure_scene_subclass(code)
+    return _fix_zero_animations(code)
 
 
 async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
@@ -444,7 +465,8 @@ async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
     )
     code = _strip_code_fences(resp.content)
     code = _inject_palette_if_missing(code)
-    return _ensure_scene_subclass(code)
+    code = _ensure_scene_subclass(code)
+    return _fix_zero_animations(code)
 
 
 def _short_error(result: SandboxResult, max_chars: int = 1200) -> str:
@@ -523,6 +545,21 @@ def _inject_palette_if_missing(code: str) -> str:
             insert_at = i + 1
     lines.insert(insert_at, "\n" + _PALETTE_HEADER + "\n")
     return "".join(lines)
+
+
+def _fix_zero_animations(code: str) -> str:
+    """Replace bare self.add() with self.play(FadeIn()) when no self.play() exists."""
+    import re
+    if "self.play(" in code:
+        return code
+    def _replace(m: re.Match) -> str:
+        args = m.group(1).strip()
+        indent = m.group(0)[: m.start(1) - m.start(0) - len("self.add(")]
+        return f"self.play(FadeIn({args}))\n{indent}self.wait(0.5)"
+    fixed = re.sub(r"self\.add\(([^)]+)\)", _replace, code)
+    if fixed != code:
+        log.warning("manim_codegen.auto_fix_zero_animations", reason="no self.play() found, replaced self.add()")
+    return fixed
 
 
 def _has_scene_subclass(code: str) -> bool:

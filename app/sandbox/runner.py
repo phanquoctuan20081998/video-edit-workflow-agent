@@ -92,11 +92,13 @@ def _exec_docker(code: str, output_dir: str | None, cfg) -> SandboxResult:
         clip = _find_output_clip(out_dir)
 
         if proc.returncode != 0 or clip is None:
+            combined = proc.stdout + proc.stderr
             err_type = "oom" if "OOM" in proc.stderr or "killed" in proc.stderr.lower() else "runtime_error"
+            traceback = _enrich_zero_animations(combined) or _enrich_common_errors(proc.stderr) or proc.stderr
             return SandboxResult(
                 success=False,
                 error_type=err_type,
-                traceback=proc.stderr,
+                traceback=traceback,
                 stdout=proc.stdout,
                 stderr=proc.stderr,
                 wall_time_sec=elapsed,
@@ -161,10 +163,12 @@ def _exec_local(code: str, output_dir: str | None, cfg) -> SandboxResult:
         clip = _find_output_clip(out_dir)
 
         if proc.returncode != 0 or clip is None:
+            combined = proc.stdout + proc.stderr
+            traceback = _enrich_zero_animations(combined) or _enrich_common_errors(proc.stderr) or _enrich_latex_error(proc.stderr)
             return SandboxResult(
                 success=False,
                 error_type="runtime_error",
-                traceback=_enrich_latex_error(proc.stderr),
+                traceback=traceback,
                 stdout=proc.stdout,
                 stderr=proc.stderr,
                 wall_time_sec=elapsed,
@@ -199,6 +203,43 @@ def _local_manim_env() -> dict[str, str]:
         env.setdefault("TEXMFMAIN", str(texlive_dist))
         env.setdefault("TEXMFCNF", str(texlive_dist / "web2c"))
     return env
+
+
+def _enrich_common_errors(traceback: str) -> str | None:
+    """Return augmented error message for well-known Manim mistakes."""
+    if "no points" in traceback.lower() or "has_no_points" in traceback:
+        return (
+            traceback.rstrip() + "\n\n"
+            "=== DIAGNOSIS ===\n"
+            "A Mobject has no points — it was created but never given geometry.\n"
+            "Common causes:\n"
+            "  1. Empty VGroup(): VGroup() has no points until children are added\n"
+            "     Fix: add children before calling .get_center()/.get_start() etc.\n"
+            "  2. Text/MathTex created but .get_center() called before self.add() or self.play()\n"
+            "     Fix: position with .move_to() / .next_to() — these work before adding to scene\n"
+            "  3. Arrow(start, end) where start/end mobject has no geometry yet\n"
+            "     Fix: ensure the source/target objects have been played/added first\n"
+        )
+    return None
+
+
+def _enrich_zero_animations(output: str) -> str | None:
+    """Return a clear repair instruction when Manim ran but played 0 animations (no MP4)."""
+    if "Played 0 animations" not in output:
+        return None
+    return (
+        "Scene executed but produced NO VIDEO — 'Played 0 animations'.\n"
+        "construct() contains only self.add() calls. Manim writes a static PNG, not MP4.\n\n"
+        "REQUIRED: every object shown must be animated with self.play():\n"
+        "  WRONG:  self.add(circle)\n"
+        "  RIGHT:  self.play(Create(circle))\n"
+        "          self.wait(1.0)\n\n"
+        "Rules:\n"
+        "- Replace ALL bare self.add(obj) with self.play(FadeIn(obj)) or self.play(Create(obj))\n"
+        "- Add self.wait(1.0) after every self.play() call\n"
+        "- Each beat section must contain at least one self.play()\n"
+        "- self.add() is only valid for background/axes added before any play() call\n"
+    )
 
 
 def _enrich_latex_error(stderr: str) -> str:
