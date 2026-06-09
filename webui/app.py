@@ -217,7 +217,7 @@ with st.sidebar:
         "🔊  Voiceover":      "final_render",
     }
 
-    if current_pid or selected_pid:
+    if selected_pid is not None:
         pending_stage = st.session_state.pop("pending_stage_nav", None)
         if pending_stage in PAGES:
             st.session_state["stage_nav"] = pending_stage
