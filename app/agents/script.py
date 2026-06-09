@@ -62,28 +62,31 @@ Create a scene-by-scene outline for a 3-5 minute explainer video. Each scene is 
 KEY PRINCIPLE: Within a scene, objects persist and transform — no hard cuts between beats.
 Each beat = one visual transition. The animation is continuous (like 3Blue1Brown).
 
+LANGUAGE REQUIREMENT: Write ALL narration text in "{language}". This is critical — the
+narration will be passed directly to a TTS engine that speaks in "{language}".
+
 Output JSON array of scenes:
 [
   {{
     "id": "s01",
     "order": 1,
-    "narration": "Full narration for the entire scene/chapter...",
+    "narration": "Full narration in {language} for the entire scene/chapter...",
     "visual_type": "manim",
     "visual_spec": "Overall visual description of the continuous animation",
     "beats": [
       {{
         "id": "s01_b01",
         "order": 1,
-        "trigger_phrase": "exact substring from narration that starts this beat",
+        "trigger_phrase": "exact substring from narration that starts this beat (in {language})",
         "visual_action": "describe what Manim animates: Create/Transform/FadeOut/etc",
-        "narration_segment": "the portion of narration this beat covers"
+        "narration_segment": "the portion of narration this beat covers (in {language})"
       }},
       {{
         "id": "s01_b02",
         "order": 2,
-        "trigger_phrase": "another exact substring",
+        "trigger_phrase": "another exact substring (in {language})",
         "visual_action": "next animation step, building on previous objects",
-        "narration_segment": "next portion of narration"
+        "narration_segment": "next portion of narration (in {language})"
       }}
     ]
   }},
@@ -97,6 +100,7 @@ RULES:
 - visual_action describes WHAT changes, referencing objects from previous beats
 - narration_segments concatenated = full narration (no gaps, no overlap)
 - visual_type: manim (math/geometry), chart (data), title_card (intro/outro)
+- narration, trigger_phrase, narration_segment MUST all be in "{language}"
 - Return ONLY valid JSON. Do not wrap it in markdown.
 - Escape any double quotes inside strings. Prefer plain-text math like TT-star over LaTeX.
 """
@@ -167,9 +171,9 @@ class ScriptAgent:
         log.info("script.research_done", topic=topic, sources=len(sources))
         return resp.content, sources
 
-    async def outline(self, topic: str, research: str) -> list[dict]:
+    async def outline(self, topic: str, research: str, language: str = "en") -> list[dict]:
         """Generate scene-by-scene outline from research."""
-        prompt = _OUTLINE_PROMPT.format(topic=topic, research=research)
+        prompt = _OUTLINE_PROMPT.format(topic=topic, research=research, language=language)
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
             system=_OUTLINE_SYSTEM,
@@ -270,10 +274,10 @@ class ScriptAgent:
 
         raise ScriptGenerationError(f"The {step} step could not be repaired into scene JSON.")
 
-    async def run(self, topic: str, language: str = "vi") -> VideoSpec:
+    async def run(self, topic: str, language: str = "en") -> VideoSpec:
         """Full pipeline: research → outline → VideoSpec."""
         research, sources = await self.research(topic)
-        outline = await self.outline(topic, research)
+        outline = await self.outline(topic, research, language=language)
         return await self.write_spec(topic, outline, sources, language=language)
 
 
