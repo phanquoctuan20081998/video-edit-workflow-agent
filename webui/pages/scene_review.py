@@ -357,7 +357,7 @@ def render() -> None:
             st.session_state["qa_approved_spec"] = spec.model_dump()
             from webui.state import save_spec
             save_spec(spec)
-            st.session_state["pending_stage_nav"] = "Voiceover + Render"
+            st.session_state["pending_stage_nav"] = "🔊  Voiceover"
             st.rerun()
     else:
         st.warning("All scenes must be approved (or manually overridden) before proceeding.")

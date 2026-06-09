@@ -153,13 +153,13 @@ def render() -> None:
             st.session_state.pop("search_run_key", None)
 
     # ── Interest prompt ───────────────────────────────────────────────────────
-    st.subheader("Topic Interests")
-    st.caption("Describe your interests — market search biases results toward these areas.")
+    st.subheader("What topics are you interested in? *")
+    st.caption("Required — the search focuses on topics related to what you type here.")
 
     interest_prompt = st.text_area(
         "Interest prompt",
         value=st.session_state.get("interest_prompt", ""),
-        placeholder="e.g. I want topics about linear algebra, neural networks, or quantum computing.",
+        placeholder="e.g. linear algebra, neural networks, quantum computing, Fourier transforms",
         height=90,
         label_visibility="collapsed",
     )
@@ -170,15 +170,18 @@ def render() -> None:
     language = col2.selectbox("Language", _LANG_OPTIONS, index=0, key="search_language")
 
     if col3.button("🔍 Run Market Search", type="primary"):
-        key = str(uuid.uuid4())[:8]
-        st.session_state["search_run_key"] = key
-        proj = st.session_state.get("current_project") or {}
-        pid  = proj.get("project_id", "")
-        if pid:
-            save_project(pid, proj.get("topic", ""), proj.get("language", "en"), "searching")
-            st.session_state["current_project"]["status"] = "searching"
-        _start_search(key, interest_prompt, int(n_topics))
-        st.rerun()
+        if not interest_prompt.strip():
+            st.error("Enter at least one topic of interest before running the search.")
+        else:
+            key = str(uuid.uuid4())[:8]
+            st.session_state["search_run_key"] = key
+            proj = st.session_state.get("current_project") or {}
+            pid  = proj.get("project_id", "")
+            if pid:
+                save_project(pid, proj.get("topic", ""), proj.get("language", "en"), "searching")
+                st.session_state["current_project"]["status"] = "searching"
+            _start_search(key, interest_prompt, int(n_topics))
+            st.rerun()
 
     st.divider()
 

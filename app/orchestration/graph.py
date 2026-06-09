@@ -24,6 +24,7 @@ class ProjectState(TypedDict):
     project_id: str
     topic: str
     language: str
+    interest_prompt: Optional[str]  # user-provided topic interests for market search
     spec: Optional[dict]           # VideoSpec as dict
     stage: str
     hitl_feedback: Optional[str]
@@ -38,11 +39,10 @@ class ProjectState(TypedDict):
 async def node_market_search(state: ProjectState) -> ProjectState:
     from app.agents.market_search import MarketSearchAgent
     agent = MarketSearchAgent()
-    candidates = await agent.search(n_topics=10)
-    # Candidates stored in state for HITL page to read
+    interest = state.get("interest_prompt") or None
+    candidates = await agent.search(n_topics=10, interest_prompt=interest)
     state["stage"] = "searched"
     state["hitl_feedback"] = None
-    # Store serialized candidates for the UI
     state["_candidates"] = [
         {"title": c.title, "score": c.composite_score, "approach": c.approach}
         for c in candidates
@@ -106,13 +106,16 @@ async def node_voiceover(state: ProjectState) -> ProjectState:
     from app.models.video_spec import VideoSpec, ProjectStatus
     from app.pipeline.voiceover import run_voiceover
     from app.config import get_settings
+    from webui.storage import update_project_status
 
+    update_project_status(state["project_id"], "voicing")
     spec = VideoSpec.model_validate(state["spec"])
     cfg = get_settings()
     spec = await run_voiceover(spec, artifact_dir=cfg.artifact_dir)
     spec.status = ProjectStatus.voiced
     state["spec"] = spec.model_dump()
     state["stage"] = "voiced"
+    update_project_status(state["project_id"], "voiced")
     return state
 
 
@@ -120,7 +123,9 @@ async def node_composite(state: ProjectState) -> ProjectState:
     from app.models.video_spec import VideoSpec, ProjectStatus
     from app.pipeline.composite import run_composite
     from app.config import get_settings
+    from webui.storage import update_project_status
 
+    update_project_status(state["project_id"], "compositing")
     spec = VideoSpec.model_validate(state["spec"])
     cfg = get_settings()
     composite_path = await run_composite(spec, artifact_dir=cfg.artifact_dir)
@@ -128,6 +133,7 @@ async def node_composite(state: ProjectState) -> ProjectState:
     state["spec"] = spec.model_dump()
     state["stage"] = "composited"
     state["_composite_path"] = composite_path
+    update_project_status(state["project_id"], "composited")
     return state
 
 
@@ -135,7 +141,9 @@ async def node_render(state: ProjectState) -> ProjectState:
     from app.models.video_spec import VideoSpec, ProjectStatus
     from app.pipeline.render import run_render
     from app.config import get_settings
+    from webui.storage import update_project_status
 
+    update_project_status(state["project_id"], "rendering")
     spec = VideoSpec.model_validate(state["spec"])
     cfg = get_settings()
     composite_path = state.get("_composite_path") or ""
@@ -151,6 +159,7 @@ async def node_render(state: ProjectState) -> ProjectState:
     state["spec"] = spec.model_dump()
     state["stage"] = "rendered"
     state["final_video_path"] = final_path
+    update_project_status(state["project_id"], "rendered")
     log.info("graph.render_done", path=final_path)
     return state
 
@@ -206,6 +215,7 @@ if __name__ == "__main__":
             "project_id": "test-1",
             "topic": topic,
             "language": "vi",
+            "interest_prompt": topic,
             "spec": None,
             "stage": "init",
             "hitl_feedback": None,

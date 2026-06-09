@@ -71,6 +71,7 @@ async def _render_final_async(project_id: str) -> dict:
     from app.pipeline.voiceover import run_voiceover
     from app.pipeline.composite import run_composite
     from app.pipeline.render import run_render
+    from webui.storage import update_project_status
 
     cfg = get_settings()
     await create_tables(cfg.database_url)
@@ -84,22 +85,28 @@ async def _render_final_async(project_id: str) -> dict:
         spec = project.get_spec()
 
         # Stage 4 — voiceover
+        update_project_status(project_id, "voicing")
         spec = await run_voiceover(spec, artifact_dir=cfg.artifact_dir)
         spec.status = ProjectStatus.voiced
         project.set_spec(spec)
         await session.commit()
+        update_project_status(project_id, "voiced")
 
         # Stage 5 — composite
+        update_project_status(project_id, "compositing")
         composite_path = await run_composite(spec, artifact_dir=cfg.artifact_dir)
         spec.status = ProjectStatus.composited
         project.set_spec(spec)
         await session.commit()
+        update_project_status(project_id, "composited")
 
         # Stage 6 — render
+        update_project_status(project_id, "rendering")
         final_path = await run_render(spec, composite_path=composite_path, artifact_dir=cfg.artifact_dir)
         spec.final_video_path = final_path
         spec.status = ProjectStatus.rendered
         project.set_spec(spec)
         await session.commit()
+        update_project_status(project_id, "rendered")
 
     return {"final_video_path": final_path}

@@ -166,6 +166,17 @@ def load_projects() -> list[dict]:
     return sorted(_load_projects_raw(), key=lambda p: p.get("updated_at", ""), reverse=True)
 
 
+def update_project_status(project_id: str, status: str) -> None:
+    """Update only the status field for an existing project (pipeline workers use this)."""
+    projects = _load_projects_raw()
+    for p in projects:
+        if p["project_id"] == project_id:
+            p["status"] = status
+            p["updated_at"] = _now_iso()
+            _write(DATA_DIR / "projects.json", projects)
+            return
+
+
 def load_project_spec(project_id: str) -> dict | None:
     """Return the most recent script spec for a project."""
     script_dir = DATA_DIR / "scripts"
