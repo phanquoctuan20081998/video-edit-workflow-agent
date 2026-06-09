@@ -132,7 +132,6 @@ def _exec_local(code: str, output_dir: str | None, cfg) -> SandboxResult:
 
         cmd = [
             sys.executable, "-m", "manim", "render",
-            "--output_dir", out_dir,
             "--media_dir", out_dir,
             "--quality", "l",
             "--format", "mp4",
@@ -147,6 +146,7 @@ def _exec_local(code: str, output_dir: str | None, cfg) -> SandboxResult:
                 cmd,
                 capture_output=True,
                 text=True,
+                env=_local_manim_env(),
                 timeout=cfg.sandbox_timeout,
             )
         except subprocess.TimeoutExpired:
@@ -164,7 +164,7 @@ def _exec_local(code: str, output_dir: str | None, cfg) -> SandboxResult:
             return SandboxResult(
                 success=False,
                 error_type="runtime_error",
-                traceback=proc.stderr,
+                traceback=_enrich_latex_error(proc.stderr),
                 stdout=proc.stdout,
                 stderr=proc.stderr,
                 wall_time_sec=elapsed,
@@ -187,6 +187,46 @@ def _find_output_clip(output_dir: str) -> str | None:
             if f.endswith(".mp4"):
                 return os.path.join(root, f)
     return None
+
+
+def _local_manim_env() -> dict[str, str]:
+    env = os.environ.copy()
+    texlive_root = Path("/opt/homebrew/opt/texlive/share")
+    texlive_dist = texlive_root / "texmf-dist"
+    if texlive_dist.exists():
+        env.setdefault("TEXMFROOT", str(texlive_root))
+        env.setdefault("TEXMFDIST", str(texlive_dist))
+        env.setdefault("TEXMFMAIN", str(texlive_dist))
+        env.setdefault("TEXMFCNF", str(texlive_dist / "web2c"))
+    return env
+
+
+def _enrich_latex_error(stderr: str) -> str:
+    log_path = _extract_latex_log_path(stderr)
+    if not log_path or not log_path.exists():
+        return stderr
+
+    lines = [line.rstrip() for line in log_path.read_text(errors="replace").splitlines()]
+    useful_lines = []
+    for index, line in enumerate(lines):
+        if line.startswith("! "):
+            useful_lines.extend(lines[index:index + 12])
+
+    if not useful_lines:
+        useful_lines = lines[-40:]
+
+    return (
+        stderr.rstrip()
+        + "\n\n=== LaTeX log excerpt ===\n"
+        + "\n".join(useful_lines[-80:])
+    )
+
+
+def _extract_latex_log_path(stderr: str) -> Path | None:
+    match = re.search(r"the log file:\s*\n?\s*([^\n]+\.log)", stderr)
+    if not match:
+        return None
+    return Path(match.group(1).strip())
 
 
 def _extract_scene_class(code: str) -> str | None:

@@ -23,6 +23,10 @@ from app.providers.factory import get_llm_provider
 
 log = structlog.get_logger()
 
+
+class ScriptGenerationError(RuntimeError):
+    """Raised when the LLM response cannot be turned into a usable VideoSpec."""
+
 _RESEARCH_SYSTEM = """\
 You are a scientific researcher and educator specializing in math, physics, and algorithms.
 You research topics thoroughly and write clear, accurate explanations suitable for video narration.
@@ -44,6 +48,7 @@ Be factual and precise. Include specific equations where relevant.
 _OUTLINE_SYSTEM = """\
 You are a video script writer for math/physics explainer videos in the style of 3Blue1Brown.
 You create scene-by-scene outlines that build intuition progressively.
+You return valid JSON only: no markdown, no prose, no comments.
 """
 
 _OUTLINE_PROMPT = """\
@@ -92,6 +97,8 @@ RULES:
 - visual_action describes WHAT changes, referencing objects from previous beats
 - narration_segments concatenated = full narration (no gaps, no overlap)
 - visual_type: manim (math/geometry), chart (data), title_card (intro/outro)
+- Return ONLY valid JSON. Do not wrap it in markdown.
+- Escape any double quotes inside strings. Prefer plain-text math like TT-star over LaTeX.
 """
 
 _SCRIPT_REFINE_PROMPT = """\
@@ -111,6 +118,23 @@ Requirements:
 - Total video: 3-5 minutes
 
 Return the refined JSON array only (same structure with scenes and beats).
+Return ONLY valid JSON. Do not wrap it in markdown. Escape any double quotes inside strings.
+Prefer plain-text math like TT-star over LaTeX when it avoids JSON escaping issues.
+"""
+
+_JSON_REPAIR_SYSTEM = """\
+You repair malformed JSON from a video-script generator.
+Return only valid JSON. Do not add markdown, explanations, or comments.
+"""
+
+_JSON_REPAIR_PROMPT = """\
+The following text was intended to be a JSON array of scene objects, but it is malformed.
+
+Repair it into a valid JSON array only. Preserve as much content as possible.
+If a string contains unescaped quotes or math notation, rewrite it safely as plain text.
+
+Malformed JSON/text:
+{text}
 """
 
 
@@ -149,10 +173,14 @@ class ScriptAgent:
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
             system=_OUTLINE_SYSTEM,
-            max_tokens=3000,
+            max_tokens=5000,
             temperature=0.5,
         )
-        scenes_data = _parse_json_array(resp.content)
+        scenes_data = await self._parse_or_repair_json_array(resp.content, step="outline")
+        if not scenes_data:
+            raise ScriptGenerationError(
+                "The outline step returned no scenes. Check the LLM response format or model output."
+            )
         log.info("script.outline_done", topic=topic, scenes=len(scenes_data))
         return scenes_data
 
@@ -172,10 +200,14 @@ class ScriptAgent:
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
             system=_OUTLINE_SYSTEM,
-            max_tokens=4000,
+            max_tokens=8000,
             temperature=0.3,
         )
-        refined = _parse_json_array(resp.content)
+        refined = await self._parse_or_repair_json_array(resp.content, step="refine")
+        if not refined:
+            raise ScriptGenerationError(
+                "The script refinement step returned no scenes. Check the LLM response format or model output."
+            )
 
         scenes = []
         for i, raw in enumerate(refined):
@@ -201,6 +233,9 @@ class ScriptAgent:
                 beats=beats,
             ))
 
+        if not scenes:
+            raise ScriptGenerationError("No scenes were generated for the VideoSpec.")
+
         spec = VideoSpec(
             topic=topic,
             language=language,
@@ -210,6 +245,30 @@ class ScriptAgent:
         log.info("script.spec_emitted", project_id=spec.project_id, scenes=len(scenes),
                  total_beats=sum(len(s.beats) for s in scenes))
         return spec
+
+    async def _parse_or_repair_json_array(self, text: str, *, step: str) -> list[dict]:
+        try:
+            parsed = _parse_json_array(text)
+        except ScriptGenerationError as first_error:
+            log.warning("script.json_repair_attempt", step=step, error=str(first_error))
+        else:
+            if parsed:
+                return parsed
+            log.warning("script.json_repair_attempt", step=step, error="parsed empty scene list")
+
+        repair_prompt = _JSON_REPAIR_PROMPT.format(text=text[:30000])
+        resp = await self._llm.complete(
+            [LLMMessage(role="user", content=repair_prompt)],
+            system=_JSON_REPAIR_SYSTEM,
+            max_tokens=8000,
+            temperature=0,
+        )
+        repaired = _parse_json_array(resp.content)
+        if repaired:
+            log.info("script.json_repair_done", step=step, scenes=len(repaired))
+            return repaired
+
+        raise ScriptGenerationError(f"The {step} step could not be repaired into scene JSON.")
 
     async def run(self, topic: str, language: str = "vi") -> VideoSpec:
         """Full pipeline: research → outline → VideoSpec."""
@@ -242,13 +301,71 @@ async def _fetch_sources(topic: str) -> list[Source]:
 
 
 def _parse_json_array(text: str) -> list[dict]:
-    """Extract JSON array from LLM response (may be wrapped in markdown)."""
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
-        log.warning("script.json_parse_failed", preview=text[:200])
-        return []
+    """Extract scene objects from an LLM response.
+
+    Accepts a bare JSON array, a fenced JSON block, or an object containing
+    a ``scenes``/``outline`` array. Raises instead of silently returning an
+    empty script so the UI can show a real error.
+    """
     try:
-        return json.loads(match.group())
+        parsed = _parse_json_payload(text)
     except json.JSONDecodeError as e:
-        log.error("script.json_decode_error", error=str(e))
+        log.error("script.json_decode_error", error=str(e), preview=text[:500])
+        raise ScriptGenerationError(
+            f"Could not parse script JSON from LLM response: {e.msg}"
+        ) from e
+
+    if isinstance(parsed, list):
+        scenes = parsed
+    elif isinstance(parsed, dict):
+        scenes = _first_scene_array(parsed)
+    else:
+        scenes = []
+
+    if not scenes:
+        log.warning("script.json_parse_empty", preview=text[:500])
         return []
+
+    return [scene for scene in scenes if isinstance(scene, dict)]
+
+
+def _parse_json_payload(text: str):
+    for fenced in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE):
+        stripped = fenced.strip()
+        if stripped:
+            return json.loads(stripped)
+
+    stripped = text.strip()
+    if not stripped:
+        raise json.JSONDecodeError("No JSON object or array found", text, 0)
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    start_positions = [pos for pos in (stripped.find("["), stripped.find("{")) if pos >= 0]
+    if not start_positions:
+        raise json.JSONDecodeError("No JSON object or array found", text, 0)
+
+    start = min(start_positions)
+    candidate = stripped[start:]
+
+    # Only attempt to parse the first apparent top-level payload. If it is
+    # malformed, raise so the repair pass can fix the original response rather
+    # than accidentally parsing a nested []/{} later in the text.
+    decoder = json.JSONDecoder()
+    parsed, _ = decoder.raw_decode(candidate)
+    return parsed
+
+
+def _first_scene_array(payload: dict) -> list:
+    for key in ("scenes", "outline", "script", "video_spec"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = _first_scene_array(value)
+            if nested:
+                return nested
+    return []

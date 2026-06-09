@@ -64,7 +64,7 @@ Anti-slop check:
 - [ ] NOT random floating objects with no relationship to each other
 - [ ] Colors are NOT all the same (monochrome objects with no differentiation)
 
-Respond with ONLY valid JSON — be specific about each issue found:
+Respond with ONLY valid minified JSON. Keep every issue under 120 characters:
 {{
   "passed": true/false,
   "correctness_issues": ["issue 1", ...],
@@ -104,7 +104,7 @@ async def vision_qa(
         resp = await provider.vision_complete(
             messages=[LLMMessage(role="user", content=prompt)],
             image_paths=frame_paths,
-            max_tokens=1024,
+            max_tokens=2048,
         )
     except NotImplementedError:
         log.warning("visual_qa.no_vision_support")
@@ -127,7 +127,7 @@ def _parse_qa_response(raw: str) -> QAResult:
     if not match:
         return QAResult(
             passed=False,
-            issues=[f"Could not parse QA response: {raw[:200]}"],
+            issues=[f"Visual QA parse error: could not find JSON object. Review rendered clip manually."],
             correctness_issues=[],
             style_issues=[],
             raw_response=raw,
@@ -147,7 +147,7 @@ def _parse_qa_response(raw: str) -> QAResult:
     except json.JSONDecodeError as e:
         return QAResult(
             passed=False,
-            issues=[f"JSON parse error: {e}"],
+            issues=[f"Visual QA parse error: {e}. Review rendered clip manually."],
             correctness_issues=[],
             style_issues=[],
             raw_response=raw,

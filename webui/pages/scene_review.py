@@ -33,6 +33,8 @@ def render():
             from app.agents.manim_codegen import run_manim_codegen
             spec = asyncio.run(run_manim_codegen(spec, max_repairs=max_repairs))
             st.session_state["approved_spec"] = spec.model_dump()
+            from webui.state import save_spec
+            save_spec(spec)
         st.rerun()
 
     st.divider()
@@ -48,10 +50,12 @@ def render():
                     qa_status = "✅ QA passed" if scene.clip_qa_passed else "⚠️ QA failed (flagged)"
                     st.markdown(qa_status)
                 else:
-                    st.info("Not yet rendered.")
+                    st.info("Not rendered yet." if not scene.manim_code else "Render failed. Check the generated Manim code below.")
                     all_approved = False
 
                 override_pass = st.checkbox("Manually approve this scene", key=f"approve_{scene.id}")
+                if override_pass and scene.clip_path and Path(scene.clip_path).exists():
+                    scene.clip_qa_passed = True
 
             with cols[1]:
                 st.markdown(f"**Narration:** {scene.narration}")
@@ -70,6 +74,8 @@ def render():
                             scene.manim_code_hash = None
                             asyncio.run(render_scene(scene, spec, max_repairs=max_repairs))
                             st.session_state["approved_spec"] = spec.model_dump()
+                            from webui.state import save_spec
+                            save_spec(spec)
                         st.rerun()
                     all_approved = False
 
@@ -77,6 +83,9 @@ def render():
     if all_approved:
         if st.button("Proceed to Voiceover + Render", type="primary"):
             st.session_state["qa_approved_spec"] = spec.model_dump()
-            st.success("All scenes approved. Ready for voiceover stage.")
+            from webui.state import save_spec
+            save_spec(spec)
+            st.session_state["pending_stage_nav"] = "Voiceover + Render"
+            st.rerun()
     else:
         st.warning("All scenes must be approved (or manually overridden) before proceeding.")

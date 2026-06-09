@@ -28,6 +28,7 @@ async def run_render(
     base_dir = artifact_dir or cfg.artifact_dir
     out_path = os.path.join(base_dir, spec.project_id, "final.mp4")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    _assert_has_video_stream(composite_path)
 
     # Concatenate per-scene audio into a single track
     audio_concat_path = os.path.join(base_dir, spec.project_id, "audio_concat.mp3")
@@ -48,12 +49,16 @@ async def run_render(
     else:
         mixed_audio = audio_streams[0]
 
-    (
-        ffmpeg
-        .output(video_in.video, mixed_audio, out_path, vcodec="libx264", acodec="aac", crf=18, preset="fast")
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    try:
+        (
+            ffmpeg
+            .output(video_in.video, mixed_audio, out_path, vcodec="libx264", acodec="aac", crf=18, preset="fast")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except ffmpeg.Error as exc:
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+        raise RuntimeError(f"ffmpeg final render failed:\n{stderr}") from exc
 
     log.info("render.done", path=out_path)
     return out_path
@@ -85,3 +90,15 @@ def _concat_audio(spec: VideoSpec, output_path: str) -> None:
 
 def _total_duration(spec: VideoSpec) -> float:
     return sum(s.duration_sec or 0.0 for s in spec.scenes)
+
+
+def _assert_has_video_stream(video_path: str) -> None:
+    try:
+        probe = ffmpeg.probe(video_path)
+    except ffmpeg.Error as exc:
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+        raise RuntimeError(f"Could not inspect composite video {video_path!r}:\n{stderr}") from exc
+
+    streams = probe.get("streams", [])
+    if not any(stream.get("codec_type") == "video" for stream in streams):
+        raise RuntimeError(f"Composite video has no video stream: {video_path}")
