@@ -251,6 +251,9 @@ class ScriptAgent:
         return spec
 
     async def _parse_or_repair_json_array(self, text: str, *, step: str) -> list[dict]:
+        if err := _detect_provider_error(text):
+            raise ScriptGenerationError(f"{step} failed: {err}. Check provider status and retry.")
+
         try:
             parsed = _parse_json_array(text)
         except ScriptGenerationError as first_error:
@@ -302,6 +305,19 @@ async def _fetch_sources(topic: str) -> list[Source]:
         log.warning("script.arxiv_failed", error=str(e))
 
     return sources
+
+
+def _detect_provider_error(text: str) -> str | None:
+    """Return a short description if text is a provider error response, else None."""
+    t = text.strip()
+    if re.search(r"""['"]error['"]\s*:""", t):
+        code = re.search(r"""['"]code['"]\s*:\s*(\d+)""", t)
+        msg  = re.search(r"""['"]message['"]\s*:\s*['"]([^'"]{0,120})""", t)
+        code_str = code.group(1) if code else "unknown"
+        msg_str  = msg.group(1)  if msg  else t[:120]
+        log.error("script.provider_error", code=code_str, message=msg_str)
+        return f"HTTP {code_str}: {msg_str}"
+    return None
 
 
 def _parse_json_array(text: str) -> list[dict]:
