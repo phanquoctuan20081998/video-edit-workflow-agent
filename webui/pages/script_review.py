@@ -62,10 +62,12 @@ def render() -> None:
     st.markdown(f"**Topic:** {topic} &nbsp;|&nbsp; **Language:** `{language}`", unsafe_allow_html=True)
 
     # ── Generate new script ───────────────────────────────────────────────────
-    if st.button("Generate New Script", type="primary"):
+    if st.button("Generate Script", type="primary"):
         with st.spinner(f"Researching and generating script in **{language}**..."):
             try:
                 spec_dict = _generate_script(topic, language)
+                if not spec_dict.get("scenes"):
+                    raise ValueError("Script generation completed, but no scenes were returned.")
                 pid = proj.get("project_id", "")
                 script_id = save_script(pid, topic, language, spec_dict)
                 save_project(pid, topic, language, "scripted", spec_dict)
@@ -75,6 +77,7 @@ def render() -> None:
                     st.session_state["current_project"]["status"] = "scripted"
                 st.rerun()
             except Exception as e:
+                st.session_state.pop("draft_spec", None)
                 st.error(f"Script generation failed: {e}")
                 return
 
@@ -83,7 +86,6 @@ def render() -> None:
     # ── Script history ────────────────────────────────────────────────────────
     all_scripts = load_scripts()
     pid = proj.get("project_id", "")
-    # Show scripts for current project first, then all others
     proj_scripts  = [s for s in all_scripts if s.get("project_id") == pid]
     other_scripts = [s for s in all_scripts if s.get("project_id") != pid]
     history = proj_scripts + other_scripts
@@ -106,7 +108,7 @@ def render() -> None:
     # ── Current script editing ────────────────────────────────────────────────
     spec_dict = st.session_state.get("draft_spec")
     if not spec_dict:
-        st.info("Click **Generate New Script** or load one from history.")
+        st.info("Click **Generate Script** or load one from history.")
         return
 
     from app.models.video_spec import VideoSpec
@@ -118,6 +120,11 @@ def render() -> None:
         f"**{len(spec.scenes)} scenes** &nbsp;|&nbsp; project `{spec.project_id[:8]}…`",
         unsafe_allow_html=True,
     )
+    if not spec.scenes:
+        st.error("This draft has 0 scenes. Click **Generate Script** again to create a new draft.")
+        st.session_state.pop("approved_spec", None)
+        return
+    st.divider()
 
     edited_scenes = []
     for i, scene in enumerate(spec.scenes):
@@ -138,7 +145,6 @@ def render() -> None:
             with cols[1]:
                 narration = st.text_area("Narration", scene.narration, height=150, key=f"narr_{i}")
 
-            # Beats preview (read-only)
             if scene.beats:
                 with st.expander(f"Beats ({len(scene.beats)})", expanded=False):
                     for b in scene.beats:
@@ -168,9 +174,13 @@ def render() -> None:
 
     if col_approve.button("Approve Script → Start Animation", type="primary"):
         updated = _build_spec_from_edits(spec_dict, edited_scenes)
+        updated["status"] = "approved"
         pid = proj.get("project_id", spec.project_id)
         save_project(pid, topic, language, "approved", updated)
         if "current_project" in st.session_state:
             st.session_state["current_project"]["status"] = "approved"
         st.session_state["approved_spec"] = updated
+        from webui.state import save_spec
+        from app.models.video_spec import VideoSpec as _VS
+        save_spec(_VS.model_validate(updated))
         st.success(f"Script approved. {len(edited_scenes)} scenes queued for animation.")

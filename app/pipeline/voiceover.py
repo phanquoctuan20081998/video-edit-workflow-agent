@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import ffmpeg
 import structlog
 
 from app.config import get_settings
@@ -28,9 +29,22 @@ async def run_voiceover(spec: VideoSpec, artifact_dir: str | None = None) -> Vid
     tts = get_tts_provider()
 
     for scene in spec.scenes:
-        if scene.audio_path and scene.duration_sec is not None:
+        if scene.audio_path and Path(scene.audio_path).exists() and scene.duration_sec and scene.duration_sec > 0:
             log.info("voiceover.skip_cached", scene_id=scene.id)
             continue
+
+        if scene.audio_path and Path(scene.audio_path).exists():
+            recovered_duration = _probe_audio_duration(scene.audio_path)
+            if recovered_duration > 0:
+                scene.duration_sec = recovered_duration
+                if scene.word_timestamps is None:
+                    scene.word_timestamps = []
+                log.info(
+                    "voiceover.recovered_cached_duration",
+                    scene_id=scene.id,
+                    duration=recovered_duration,
+                )
+                continue
 
         out_path = os.path.join(base_dir, spec.project_id, "audio", f"{scene.id}.mp3")
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -49,3 +63,15 @@ async def run_voiceover(spec: VideoSpec, artifact_dir: str | None = None) -> Vid
         log.info("voiceover.done", scene_id=scene.id, duration=result.duration_sec)
 
     return spec
+
+
+def _probe_audio_duration(audio_path: str) -> float:
+    try:
+        probe = ffmpeg.probe(audio_path)
+    except ffmpeg.Error:
+        return 0.0
+
+    duration = probe.get("format", {}).get("duration")
+    if duration is None:
+        return 0.0
+    return round(float(duration), 3)

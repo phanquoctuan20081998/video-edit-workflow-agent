@@ -12,8 +12,10 @@ Cap: raises RepairCapExceeded after max_repairs attempts.
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
+import traceback as traceback_module
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +30,8 @@ from app.sandbox.frame_sampler import sample_frames
 from app.sandbox.runner import SandboxResult, sandbox_exec
 
 log = structlog.get_logger()
+
+_CODEGEN_MAX_TOKENS = 6000
 
 _GENERATE_SYSTEM = """\
 You are an expert Manim Community Edition (CE) developer generating math/physics explainer
@@ -71,6 +75,11 @@ NEVER assign colors arbitrarily. Viewer infers: same color = same concept.
 
 ═══ TYPOGRAPHY ═══
 - MathTex for ALL math. Never: Text("f(x) = x²") — always: MathTex(r"f(x) = x^2")
+- MathTex strings must contain ASCII LaTeX only. Never put Vietnamese, Unicode prose,
+  or natural-language labels inside MathTex or \text{...}; use Text(...) for prose labels
+  and place a separate MathTex(...) next to it for formulas.
+  Bad: MathTex(r"T_j \\text{ xử lý } k : 2^j \\le |k| < 2^{j+1}")
+  Good: VGroup(MathTex(r"T_j"), Text("xử lý"), MathTex(r"k : 2^j \\le |k| < 2^{j+1}"))
 - After creating MathTex, check width: if tex.width > 10: tex.scale(10 / tex.width)
 - Title: Text("title", font_size=40, color=P_WHITE).to_edge(UP, buff=0.5)
 - Labels: scale(0.65) relative to main objects, next_to(obj, direction, buff=0.25)
@@ -178,6 +187,7 @@ class RenderResult:
     code: str
     attempts: int
     flagged_for_human: bool = False
+    error: str | None = None
 
 
 async def render_scene(
@@ -212,13 +222,38 @@ async def render_scene(
             total_attempts += 1
             log.info("manim_codegen.exec", scene_id=scene.id, attempt=attempt)
             scene.set_manim_code(code)
-            sandbox_result = sandbox_exec(code, output_dir=out_dir)
+            sandbox_result = (
+                _syntax_check(code)
+                or _latex_source_check(code)
+                or sandbox_exec(code, output_dir=out_dir)
+            )
 
             if not sandbox_result.success:
+                error_text = _short_error(sandbox_result)
                 if attempt == max_repairs:
-                    log.warning("manim_codegen.repair_cap_runtime", scene_id=scene.id)
+                    scene.set_manim_code(code)
+                    log.warning(
+                        "manim_codegen.repair_cap_runtime",
+                        scene_id=scene.id,
+                        error_type=sandbox_result.error_type,
+                        error=error_text,
+                    )
+                    best_result = RenderResult(
+                        success=False,
+                        clip_path=None,
+                        qa_passed=False,
+                        code=code,
+                        attempts=total_attempts,
+                        flagged_for_human=True,
+                        error=error_text,
+                    )
                     break
-                log.info("manim_codegen.repair_runtime", scene_id=scene.id, error_type=sandbox_result.error_type)
+                log.info(
+                    "manim_codegen.repair_runtime",
+                    scene_id=scene.id,
+                    error_type=sandbox_result.error_type,
+                    error=error_text,
+                )
                 code = await _repair_runtime(llm, code, sandbox_result)
                 continue
 
@@ -232,6 +267,15 @@ async def render_scene(
                 scene.set_clip(dest, qa_passed=True)
                 log.info("manim_codegen.success", scene_id=scene.id, attempts=total_attempts)
                 return RenderResult(success=True, clip_path=dest, qa_passed=True, code=code, attempts=total_attempts)
+
+            if _is_qa_infrastructure_error(qa.issues):
+                dest = _save_clip(sandbox_result.clip_path, out_dir, scene.id)
+                best_result = RenderResult(
+                    success=True, clip_path=dest, qa_passed=False, code=code,
+                    attempts=total_attempts, flagged_for_human=True,
+                    error="\n".join(qa.issues),
+                )
+                break
 
             if attempt == max_repairs:
                 # Best-effort: save even if QA failed, flag for human
@@ -248,11 +292,23 @@ async def render_scene(
     if best_result:
         log.warning("manim_codegen.flagged_for_human", scene_id=scene.id)
         scene.set_manim_code(best_result.code)
-        scene.set_clip(best_result.clip_path, qa_passed=False)
+        if best_result.clip_path:
+            scene.set_clip(best_result.clip_path, qa_passed=False)
+        else:
+            scene.clip_path = None
+            scene.clip_qa_passed = False
         return best_result
 
+    scene.set_manim_code(code)
     scene.set_clip(None, qa_passed=False)
-    return RenderResult(success=False, clip_path=None, qa_passed=False, code=code, attempts=max_repairs, flagged_for_human=True)
+    return RenderResult(
+        success=False,
+        clip_path=None,
+        qa_passed=False,
+        code=code,
+        attempts=max_repairs,
+        flagged_for_human=True,
+    )
 
 
 async def run_manim_codegen(spec: VideoSpec, artifact_dir: str | None = None, max_repairs: int = 4) -> VideoSpec:
@@ -296,7 +352,7 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
     resp = await llm.complete(
         [LLMMessage(role="user", content=prompt)],
         system=_GENERATE_SYSTEM,
-        max_tokens=2048,
+        max_tokens=_CODEGEN_MAX_TOKENS,
         temperature=0.3,
     )
     return _strip_code_fences(resp.content)
@@ -307,10 +363,30 @@ async def _repair_runtime(llm, code: str, result: SandboxResult) -> str:
     resp = await llm.complete(
         [LLMMessage(role="user", content=prompt)],
         system=_GENERATE_SYSTEM,
-        max_tokens=2048,
+        max_tokens=_CODEGEN_MAX_TOKENS,
         temperature=0.2,
     )
     return _strip_code_fences(resp.content)
+
+
+def _short_error(result: SandboxResult, max_chars: int = 1200) -> str:
+    text = result.traceback or result.stderr or result.stdout or "No sandbox error output."
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return "No sandbox error output."
+    tail = "\n".join(lines[-12:])
+    if len(tail) > max_chars:
+        return tail[-max_chars:]
+    return tail
+
+
+def _is_qa_infrastructure_error(issues: list[str]) -> bool:
+    parse_markers = (
+        "Visual QA parse error",
+        "JSON parse error",
+        "Could not parse QA response",
+    )
+    return any(any(marker in issue for marker in parse_markers) for issue in issues)
 
 
 async def _repair_visual(llm, code: str, issues: list[str]) -> str:
@@ -318,10 +394,64 @@ async def _repair_visual(llm, code: str, issues: list[str]) -> str:
     resp = await llm.complete(
         [LLMMessage(role="user", content=prompt)],
         system=_GENERATE_SYSTEM,
-        max_tokens=2048,
+        max_tokens=_CODEGEN_MAX_TOKENS,
         temperature=0.2,
     )
     return _strip_code_fences(resp.content)
+
+
+def _syntax_check(code: str) -> SandboxResult | None:
+    """Return a runtime-style failure if generated code is not valid Python."""
+    try:
+        compile(code, "generated_manim_scene.py", "exec")
+    except SyntaxError as exc:
+        return SandboxResult(
+            success=False,
+            error_type="runtime_error",
+            traceback="".join(traceback_module.format_exception_only(type(exc), exc)).strip(),
+        )
+    return None
+
+
+def _latex_source_check(code: str) -> SandboxResult | None:
+    """Catch Unicode in Tex/MathTex before pdfLaTeX fails later."""
+    tree = ast.parse(code)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_tex_call(node):
+            continue
+        for arg in node.args:
+            value = _literal_string(arg)
+            if value and not value.isascii():
+                return SandboxResult(
+                    success=False,
+                    error_type="runtime_error",
+                    traceback=(
+                        "Invalid Manim LaTeX source: Tex/MathTex received non-ASCII text.\n"
+                        f"Bad fragment: {value!r}\n"
+                        "Tex/MathTex must contain ASCII LaTeX only. Move natural-language "
+                        "or Vietnamese text into Text(...), and keep formulas in separate "
+                        "MathTex(...) objects."
+                    ),
+                )
+    return None
+
+
+def _is_tex_call(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in {"Tex", "MathTex"}
+    if isinstance(func, ast.Attribute):
+        return func.attr in {"Tex", "MathTex"}
+    return False
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = [part.value for part in node.values if isinstance(part, ast.Constant) and isinstance(part.value, str)]
+        return "".join(parts)
+    return None
 
 
 def _check_cache(scene: Scene, out_dir: str) -> str | None:
@@ -339,6 +469,8 @@ def _check_cache(scene: Scene, out_dir: str) -> str | None:
 
 def _save_clip(src: str, out_dir: str, scene_id: str) -> str:
     dest = os.path.join(out_dir, f"{scene_id}.mp4")
+    if Path(src).resolve() == Path(dest).resolve():
+        return dest
     shutil.copy2(src, dest)
     return dest
 

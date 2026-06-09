@@ -133,7 +133,7 @@ resource/           fonts/, songs/
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11 or 3.12
 - [`uv`](https://github.com/astral-sh/uv) — `pip install uv`
 - `ffmpeg` in PATH
 - API key for Anthropic or OpenAI
@@ -245,6 +245,11 @@ SANDBOX_MODE=local
 Requires `manim` installed locally:
 ```bash
 pip install manim==0.18.1
+```
+
+On macOS, local Manim rendering also requires native graphics/media libraries:
+```bash
+brew install pkg-config cairo pango ffmpeg texlive dvisvgm
 ```
 
 **Warning:** Local mode runs LLM-generated code without isolation. Dev only.

@@ -26,7 +26,7 @@ async def run_composite(spec: VideoSpec, artifact_dir: str | None = None) -> str
     base_dir = artifact_dir or cfg.artifact_dir
 
     # Invariant: voiceover must have run for all scenes
-    missing = [s.id for s in spec.scenes if s.duration_sec is None]
+    missing = [s.id for s in spec.scenes if s.duration_sec is None or s.duration_sec <= 0]
     assert not missing, f"Scenes missing duration_sec (voiceover not run): {missing}"
 
     # Resolve beat timing now that we have word timestamps
@@ -141,4 +141,3 @@ def _speed_effect(factor: float):
     """Create a speed change effect. factor > 1 = faster, < 1 = slower."""
     from moviepy.video.fx import MultiplySpeed
     return MultiplySpeed(factor=factor)
-

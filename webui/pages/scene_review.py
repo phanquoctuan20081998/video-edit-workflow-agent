@@ -58,13 +58,14 @@ def render() -> None:
                 spec = _render_all_scenes(spec, max_repairs)
                 spec_dict = spec.model_dump()
                 st.session_state["approved_spec"] = spec_dict
-                # Save render history for each scene
                 for scene in spec.scenes:
                     if scene.clip_path:
                         save_scene_render(pid, scene.id, scene.model_dump())
                 save_project(pid, spec.topic, spec.language, "animated", spec_dict)
                 if "current_project" in st.session_state:
                     st.session_state["current_project"]["status"] = "animated"
+                from webui.state import save_spec
+                save_spec(spec)
             except Exception as e:
                 st.error(f"Codegen failed: {e}")
                 return
@@ -103,12 +104,11 @@ def render() -> None:
                     qa_passed = chosen_scene_dict.get("clip_qa_passed")
 
                     if st.button("Use this render", key=f"use_{scene.id}_{chosen_idx}"):
-                        # Patch the live spec with the chosen render
                         for s in spec.scenes:
                             if s.id == scene.id:
-                                s.clip_path     = clip_path
-                                s.clip_qa_passed = qa_passed
-                                s.manim_code    = chosen_scene_dict.get("manim_code")
+                                s.clip_path       = clip_path
+                                s.clip_qa_passed  = qa_passed
+                                s.manim_code      = chosen_scene_dict.get("manim_code")
                                 s.manim_code_hash = chosen_scene_dict.get("manim_code_hash")
                         st.session_state["approved_spec"] = spec.model_dump()
                         st.rerun()
@@ -120,10 +120,12 @@ def render() -> None:
                     st.video(clip_path)
                     st.markdown("✅ QA passed" if qa_passed else "⚠️ QA flagged")
                 else:
-                    st.info("Not yet rendered.")
+                    st.info("Not rendered yet." if not scene.manim_code else "Render failed. Check the generated Manim code below.")
                     all_approved = False
 
-                override = st.checkbox("Manually approve", key=f"override_{scene.id}")
+                override_pass = st.checkbox("Manually approve this scene", key=f"approve_{scene.id}")
+                if override_pass and scene.clip_path and Path(scene.clip_path).exists():
+                    scene.clip_qa_passed = True
 
             with right:
                 st.markdown(f"**Narration:** {scene.narration}")
@@ -138,7 +140,7 @@ def render() -> None:
                     with st.expander("Manim code"):
                         st.code(scene.manim_code, language="python")
 
-                if not qa_passed and not override:
+                if not scene.clip_qa_passed and not override_pass:
                     all_approved = False
                     if st.button(f"Re-generate {scene.id}", key=f"regen_{scene.id}"):
                         with st.spinner(f"Re-generating {scene.id}..."):
@@ -149,6 +151,8 @@ def render() -> None:
                                 spec_dict = spec.model_dump()
                                 st.session_state["approved_spec"] = spec_dict
                                 save_scene_render(pid, scene.id, scene.model_dump())
+                                from webui.state import save_spec
+                                save_spec(spec)
                             except Exception as e:
                                 st.error(f"Re-generate failed: {e}")
                         st.rerun()
@@ -161,6 +165,9 @@ def render() -> None:
             if "current_project" in st.session_state:
                 st.session_state["current_project"]["status"] = "animated"
             st.session_state["qa_approved_spec"] = spec.model_dump()
-            st.success("All scenes approved. Ready for voiceover stage.")
+            from webui.state import save_spec
+            save_spec(spec)
+            st.session_state["pending_stage_nav"] = "Voiceover + Render"
+            st.rerun()
     else:
         st.warning("All scenes must be approved (or manually overridden) before proceeding.")
