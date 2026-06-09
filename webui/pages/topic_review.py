@@ -3,14 +3,13 @@
 Background-task pattern:
   - Search runs in a daemon thread via ThreadPoolExecutor.
   - Results land in a @st.cache_resource dict (survives page navigation).
-  - On every render the page polls the store; if still running it sleeps 1s
-    then calls st.rerun() so the spinner stays visible across navigation.
+  - A st.fragment(run_every=2) polls the store every 2s without a full page
+    rerun, eliminating the spinner flicker of the old sleep(1)+rerun pattern.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import time
 import uuid
 from datetime import datetime
 
@@ -33,6 +32,18 @@ def _task_store() -> dict:
 @st.cache_resource
 def _executor() -> concurrent.futures.ThreadPoolExecutor:
     return concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="market_search")
+
+
+@st.fragment(run_every=2)
+def _running_poll(run_key: str) -> None:
+    """Fragment that auto-reruns every 2s without a full page rerun."""
+    store = _task_store()
+    task = store.get(run_key, {})
+    if task.get("status") == "running":
+        st.info("🔍 Market search running… (you can navigate away and come back)")
+        st.caption("⏳ Fetching and scoring topics...")
+    else:
+        st.rerun()
 
 
 def _start_search(run_key: str, prompt: str, n_topics: int) -> None:
@@ -112,10 +123,7 @@ def render() -> None:
         task = store[run_key]
 
         if task["status"] == "running":
-            st.info("🔍 Market search running… (you can navigate away and come back)")
-            with st.spinner("Fetching and scoring topics..."):
-                time.sleep(1)
-            st.rerun()
+            _running_poll(run_key)
             return
 
         elif task["status"] == "done":

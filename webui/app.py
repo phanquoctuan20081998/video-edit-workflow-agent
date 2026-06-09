@@ -54,6 +54,17 @@ from webui.storage import load_projects, save_project, load_project_spec
 
 hydrate_session_state(st.session_state)
 
+_PROJECT_KEYS = [
+    "draft_spec", "approved_spec", "qa_approved_spec",
+    "topic_candidates", "selected_topic_idx",
+    "active_script_id", "interest_prompt",
+    "search_run_key", "script_run_key",
+]
+
+def _reset_project_session(ss) -> None:
+    for k in _PROJECT_KEYS:
+        ss.pop(k, None)
+
 _LANG_OPTIONS = ["en", "vi", "ja", "zh", "ko", "fr", "de", "es"]
 
 _STATUS_CSS = {
@@ -101,6 +112,7 @@ with st.sidebar:
             if st.form_submit_button("Create", type="primary") and new_topic.strip():
                 pid = str(uuid.uuid4())
                 save_project(pid, new_topic.strip(), "en", "searched")
+                _reset_project_session(st.session_state)
                 st.session_state["current_project"] = {
                     "project_id": pid,
                     "topic": new_topic.strip(),
@@ -115,6 +127,7 @@ with st.sidebar:
     elif selected_pid != current_pid:
         proj_data = next(p for p in projects if p["project_id"] == selected_pid)
         spec = load_project_spec(selected_pid)
+        _reset_project_session(st.session_state)
         st.session_state["current_project"] = {
             "project_id": selected_pid,
             "topic": proj_data["topic"],
@@ -126,9 +139,6 @@ with st.sidebar:
         if spec:
             st.session_state["draft_spec"]    = spec
             st.session_state["approved_spec"] = spec
-        else:
-            st.session_state.pop("draft_spec", None)
-            st.session_state.pop("approved_spec", None)
         st.rerun()
 
     # ── Show current project info + edit ─────────────────────────────────────

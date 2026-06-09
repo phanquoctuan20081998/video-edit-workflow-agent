@@ -3,13 +3,12 @@
 Background-task pattern mirrors topic_review.py:
   - Script generation runs in a daemon thread.
   - Results stored in @st.cache_resource dict (survives page navigation).
-  - Page polls and re-runs until done.
+  - A st.fragment(run_every=2) polls without full page rerun (no flicker).
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import time
 import uuid
 from datetime import datetime
 
@@ -31,6 +30,17 @@ def _script_store() -> dict:
 @st.cache_resource
 def _script_executor() -> concurrent.futures.ThreadPoolExecutor:
     return concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="script_gen")
+
+
+@st.fragment(run_every=2)
+def _script_running_poll(run_key: str) -> None:
+    store = _script_store()
+    task = store.get(run_key, {})
+    if task.get("status") == "running":
+        st.info("📝 Script generation running… (you can navigate away and come back)")
+        st.caption("⏳ Researching and writing scenes...")
+    else:
+        st.rerun()
 
 
 def _start_script_task(run_key: str, topic: str, language: str) -> None:
@@ -100,10 +110,7 @@ def render() -> None:
     if run_key and run_key in store:
         task = store[run_key]
         if task["status"] == "running":
-            st.info("📝 Script generation running… (you can navigate away and come back)")
-            with st.spinner("Researching and writing scenes..."):
-                time.sleep(1)
-            st.rerun()
+            _script_running_poll(run_key)
             return
         elif task["status"] == "done":
             spec_dict = task["spec"]
