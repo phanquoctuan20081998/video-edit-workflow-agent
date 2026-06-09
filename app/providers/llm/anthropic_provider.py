@@ -22,6 +22,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         system: str | None = None,
+        **kwargs,
     ) -> LLMResponse:
         kwargs: dict = dict(
             model=self._model,
@@ -31,11 +32,17 @@ class AnthropicProvider(LLMProvider):
         if system:
             kwargs["system"] = system
         resp = await self._client.messages.create(**kwargs)
+        raw = None
+        try:
+            raw = resp
+        except Exception:
+            raw = None
         return LLMResponse(
             content=resp.content[0].text,
             model=resp.model,
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
+            raw=raw,
         )
 
     async def vision_complete(
@@ -44,6 +51,7 @@ class AnthropicProvider(LLMProvider):
         image_paths: list[str],
         *,
         max_tokens: int = 1024,
+        **kwargs,
     ) -> LLMResponse:
         image_blocks = []
         for path in image_paths:
@@ -63,9 +71,15 @@ class AnthropicProvider(LLMProvider):
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": content}],
         )
+        raw = None
+        try:
+            raw = resp
+        except Exception:
+            raw = None
         return LLMResponse(
             content=resp.content[0].text,
             model=resp.model,
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
+            raw=raw,
         )

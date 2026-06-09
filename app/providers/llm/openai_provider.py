@@ -22,6 +22,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         system: str | None = None,
+        **kwargs,
     ) -> LLMResponse:
         formatted = []
         if system:
@@ -35,11 +36,18 @@ class OpenAIProvider(LLMProvider):
             temperature=temperature,
         )
         choice = resp.choices[0]
+        # try to capture raw response if possible
+        raw = None
+        try:
+            raw = resp
+        except Exception:
+            raw = None
         return LLMResponse(
             content=choice.message.content or "",
             model=resp.model,
             input_tokens=resp.usage.prompt_tokens,
             output_tokens=resp.usage.completion_tokens,
+            raw=raw,
         )
 
     async def vision_complete(
@@ -48,6 +56,7 @@ class OpenAIProvider(LLMProvider):
         image_paths: list[str],
         *,
         max_tokens: int = 1024,
+        **kwargs,
     ) -> LLMResponse:
         content: list = []
         for path in image_paths:
@@ -66,9 +75,15 @@ class OpenAIProvider(LLMProvider):
             max_tokens=max_tokens,
         )
         choice = resp.choices[0]
+        raw = None
+        try:
+            raw = resp
+        except Exception:
+            raw = None
         return LLMResponse(
             content=choice.message.content or "",
             model=resp.model,
             input_tokens=resp.usage.prompt_tokens,
             output_tokens=resp.usage.completion_tokens,
+            raw=raw,
         )

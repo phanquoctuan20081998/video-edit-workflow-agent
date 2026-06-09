@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     llm_model: str = "claude-sonnet-4-6"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    openrouter_api_key: str = ""
 
     # Vision QA
     vision_provider: str = "anthropic"

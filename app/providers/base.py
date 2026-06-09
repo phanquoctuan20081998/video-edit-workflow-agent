@@ -20,6 +20,7 @@ class LLMResponse:
     model: str
     input_tokens: int
     output_tokens: int
+    raw: Any = None
 
 
 @dataclass
@@ -46,6 +47,7 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         system: str | None = None,
+        **kwargs: Any,
     ) -> LLMResponse: ...
 
     async def vision_complete(
@@ -54,6 +56,7 @@ class LLMProvider(ABC):
         image_paths: list[str],
         *,
         max_tokens: int = 1024,
+        **kwargs: Any,
     ) -> LLMResponse:
         raise NotImplementedError(f"{type(self).__name__} does not support vision")
 

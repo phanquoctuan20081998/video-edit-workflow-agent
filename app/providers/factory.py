@@ -17,6 +17,9 @@ def get_llm_provider(settings: Settings | None = None) -> LLMProvider:
     if cfg.llm_provider == "openai":
         from app.providers.llm.openai_provider import OpenAIProvider
         return OpenAIProvider(api_key=cfg.openai_api_key, model=cfg.llm_model)
+    if cfg.llm_provider == "openrouter":
+        from app.providers.llm.openrouter_provider import OpenRouterProvider
+        return OpenRouterProvider(api_key=cfg.openrouter_api_key, model=cfg.llm_model)
     raise ValueError(f"Unknown LLM provider: {cfg.llm_provider!r}")
 
 
@@ -29,6 +32,9 @@ def get_vision_provider(settings: Settings | None = None) -> LLMProvider:
     if cfg.vision_provider == "openai":
         from app.providers.llm.openai_provider import OpenAIProvider
         return OpenAIProvider(api_key=cfg.openai_api_key, model=cfg.vision_model)
+    if cfg.vision_provider == "openrouter":
+        from app.providers.llm.openrouter_provider import OpenRouterProvider
+        return OpenRouterProvider(api_key=cfg.openrouter_api_key, model=cfg.vision_model)
     raise ValueError(f"Unknown vision provider: {cfg.vision_provider!r}")
 
 
