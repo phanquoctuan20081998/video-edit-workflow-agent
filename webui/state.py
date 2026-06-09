@@ -16,6 +16,10 @@ def save_spec(spec: VideoSpec) -> None:
     asyncio.run(_save_spec(spec))
 
 
+def delete_project(project_id: str) -> None:
+    asyncio.run(_delete_project(project_id))
+
+
 def load_latest_spec() -> VideoSpec | None:
     return asyncio.run(_load_latest_spec())
 
@@ -45,6 +49,17 @@ def hydrate_session_state(session_state) -> None:
     }
     if spec.status.value in {"approved", "animated", "voiced", "composited", "rendered"}:
         session_state["approved_spec"] = spec_dict
+
+
+async def _delete_project(project_id: str) -> None:
+    database_url = get_settings().database_url
+    await create_tables(database_url)
+    session_factory = get_session_factory(database_url)
+    async with session_factory() as session:
+        project = await session.get(Project, project_id)
+        if project:
+            await session.delete(project)
+            await session.commit()
 
 
 async def _save_spec(spec: VideoSpec) -> None:

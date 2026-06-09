@@ -140,8 +140,13 @@ def render() -> None:
             _run_all_poll(run_key)
             return
         elif task["status"] == "done":
-            result_spec_dict = task["spec_dict"]
             task_pid = task.get("pid", pid)
+            if task_pid != pid:
+                del store[run_key]
+                st.session_state.pop("scene_run_key", None)
+                st.rerun()
+                return
+            result_spec_dict = task["spec_dict"]
             result_spec = VideoSpec.model_validate(result_spec_dict)
             st.session_state["approved_spec"] = result_spec_dict
             for scene in result_spec.scenes:
@@ -168,18 +173,19 @@ def render() -> None:
             continue
         task = store[regen_key]
         if task["status"] == "done":
-            result_spec_dict = task["spec_dict"]
             task_pid = task.get("pid", pid)
             scene_id = task.get("scene_id", scene.id)
-            result_spec = VideoSpec.model_validate(result_spec_dict)
-            st.session_state["approved_spec"] = result_spec_dict
-            done_scene = next((s for s in result_spec.scenes if s.id == scene_id), None)
-            if done_scene:
-                save_scene_render(task_pid, scene_id, done_scene.model_dump())
-            from webui.state import save_spec
-            save_spec(result_spec)
             del store[regen_key]
             st.session_state.pop(f"regen_run_{scene.id}", None)
+            if task_pid == pid:
+                result_spec_dict = task["spec_dict"]
+                result_spec = VideoSpec.model_validate(result_spec_dict)
+                st.session_state["approved_spec"] = result_spec_dict
+                done_scene = next((s for s in result_spec.scenes if s.id == scene_id), None)
+                if done_scene:
+                    save_scene_render(task_pid, scene_id, done_scene.model_dump())
+                from webui.state import save_spec
+                save_spec(result_spec)
             st.rerun()
             return
         elif task["status"] == "error":

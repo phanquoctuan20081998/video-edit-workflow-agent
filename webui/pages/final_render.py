@@ -45,9 +45,9 @@ def _render_poll(run_key: str) -> None:
         st.rerun()
 
 
-def _submit_render(run_key: str, spec_dict: dict) -> None:
+def _submit_render(run_key: str, spec_dict: dict, pid: str) -> None:
     store = _render_store()
-    store[run_key] = {"status": "running", "stage": "Starting…", "log": [], "started_at": time.monotonic()}
+    store[run_key] = {"status": "running", "stage": "Starting…", "log": [], "started_at": time.monotonic(), "pid": pid}
 
     def _worker():
         try:
@@ -81,9 +81,9 @@ def _submit_render(run_key: str, spec_dict: dict) -> None:
             spec.status = ProjectStatus.rendered
             store[run_key]["log"].append("Render done.")
 
-            store[run_key] = {"status": "done", "spec_dict": spec.model_dump(), "final_path": final_path}
+            store[run_key] = {"status": "done", "spec_dict": spec.model_dump(), "final_path": final_path, "pid": pid}
         except Exception as e:
-            store[run_key] = {"status": "error", "error": str(e)}
+            store[run_key] = {"status": "error", "error": str(e), "pid": pid}
 
     _render_executor().submit(_worker)
 
@@ -117,14 +117,16 @@ def render():
             _render_poll(run_key)
             return
         elif task["status"] == "done":
-            result_spec_dict = task["spec_dict"]
-            result_spec = VideoSpec.model_validate(result_spec_dict)
-            st.session_state["approved_spec"] = result_spec_dict
-            st.session_state["qa_approved_spec"] = result_spec_dict
-            from webui.state import save_spec
-            save_spec(result_spec)
+            task_pid = task.get("pid", spec.project_id)
             del store[run_key]
             st.session_state.pop("render_run_key", None)
+            if task_pid == spec.project_id:
+                result_spec_dict = task["spec_dict"]
+                result_spec = VideoSpec.model_validate(result_spec_dict)
+                st.session_state["approved_spec"] = result_spec_dict
+                st.session_state["qa_approved_spec"] = result_spec_dict
+                from webui.state import save_spec
+                save_spec(result_spec)
             st.rerun()
             return
         elif task["status"] == "error":
@@ -137,7 +139,7 @@ def render():
     if st.button("Run Voiceover + Final Render", type="primary"):
         key = str(uuid.uuid4())[:8]
         st.session_state["render_run_key"] = key
-        _submit_render(key, spec_dict)
+        _submit_render(key, spec_dict, spec.project_id)
         st.rerun()
 
     st.divider()

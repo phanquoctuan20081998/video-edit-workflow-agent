@@ -59,6 +59,8 @@ _PROJECT_KEYS = [
     "topic_candidates", "selected_topic_idx",
     "active_script_id", "interest_prompt",
     "search_run_key", "script_run_key",
+    "scene_run_key", "render_run_key",
+    "approved_topic", "language",
 ]
 
 def _reset_project_session(ss) -> None:
@@ -183,18 +185,17 @@ with st.sidebar:
                 st.rerun()
 
             if delete:
-                # Remove from projects list
                 import json
                 from webui.storage import DATA_DIR
+                from webui.state import delete_project as _db_delete
                 proj_file = DATA_DIR / "projects.json"
                 if proj_file.exists():
                     all_p = json.loads(proj_file.read_text(encoding="utf-8"))
                     all_p = [p for p in all_p if p["project_id"] != current_pid]
                     proj_file.write_text(json.dumps(all_p, ensure_ascii=False, indent=2), encoding="utf-8")
+                _db_delete(current_pid)
                 st.session_state.pop("current_project", None)
-                st.session_state.pop("approved_topic", None)
-                st.session_state.pop("draft_spec", None)
-                st.session_state.pop("approved_spec", None)
+                _reset_project_session(st.session_state)
                 st.rerun()
 
         # Save button
