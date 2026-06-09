@@ -81,7 +81,7 @@ Each topic includes an optional engagement_signal — a real number from live da
 Use engagement_signal as the PRIMARY anchor for trending_score.
 High signal → high trending_score. Do NOT rely solely on training knowledge.
 
-Topics:
+{interest_block}Topics:
 {topics_json}
 
 For each topic provide:
@@ -105,7 +105,9 @@ class MarketSearchAgent:
         self._llm = llm or get_llm_provider()
         self._cfg = get_settings()
 
-    async def search(self, n_topics: int = 10) -> list[TopicCandidate]:
+    async def search(
+        self, n_topics: int = 10, interest_prompt: str | None = None
+    ) -> list[TopicCandidate]:
         raw_topics: list[dict] = []
 
         # Run all fetchers concurrently
@@ -128,12 +130,14 @@ class MarketSearchAgent:
             return []
 
         raw_topics = _deduplicate(raw_topics)[:40]
-        scored = await self._score_topics(raw_topics)
+        scored = await self._score_topics(raw_topics, interest_prompt=interest_prompt)
         ranked = sorted(scored, key=lambda t: t.composite_score, reverse=True)
         log.info("market_search.done", total=len(ranked))
         return ranked[:n_topics]
 
-    async def _score_topics(self, raw_topics: list[dict]) -> list[TopicCandidate]:
+    async def _score_topics(
+        self, raw_topics: list[dict], interest_prompt: str | None = None
+    ) -> list[TopicCandidate]:
         payload = [
             {
                 "title": t["title"],
@@ -142,7 +146,16 @@ class MarketSearchAgent:
             }
             for t in raw_topics
         ]
-        prompt = _SCORE_PROMPT.format(topics_json=json.dumps(payload, ensure_ascii=False))
+        interest_block = (
+            f"USER INTEREST: The user is specifically interested in: {interest_prompt}\n"
+            "Boost composite_score for topics matching or related to these interests.\n\n"
+            if interest_prompt and interest_prompt.strip()
+            else ""
+        )
+        prompt = _SCORE_PROMPT.format(
+            topics_json=json.dumps(payload, ensure_ascii=False),
+            interest_block=interest_block,
+        )
 
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],

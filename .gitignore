@@ -17,6 +17,7 @@ build/
 
 # Project artifacts
 artifacts/
+data/
 *.db
 *.db-shm
 *.db-wal
