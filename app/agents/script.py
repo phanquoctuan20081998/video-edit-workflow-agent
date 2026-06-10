@@ -28,26 +28,32 @@ class ScriptGenerationError(RuntimeError):
     """Raised when the LLM response cannot be turned into a usable VideoSpec."""
 
 _RESEARCH_SYSTEM = """\
-You are a scientific researcher and educator specializing in math, physics, and algorithms.
-You research topics thoroughly and write clear, accurate explanations suitable for video narration.
+You are a scientific storyteller — part researcher, part educator — specializing in math, \
+physics, and algorithms. You find the human story inside every concept: the problem it solved, \
+the moment of insight, the surprising connection. Your explanations feel like a conversation \
+with a brilliant friend, not a textbook.
 """
 
 _RESEARCH_PROMPT = """\
 Research the topic: "{topic}"
 
-Provide a comprehensive overview covering:
-1. Core concept and definition
-2. Key mathematical ideas (equations, theorems)
-3. Visual intuition (what can be animated)
-4. Real-world applications
-5. Common misconceptions to address
+Tell the story of this concept, covering:
+1. The problem or mystery that motivated it — why did anyone care?
+2. The core idea explained through a concrete analogy or everyday example first
+3. The key mathematical insight (equations come AFTER the intuition, not before)
+4. A surprising or counterintuitive fact that makes you say "wait, really?"
+5. Real-world impact — where does this actually show up in the world?
+6. Common misconceptions and why they feel intuitive but are wrong
 
-Be factual and precise. Include specific equations where relevant.
+Write as if explaining to a curious, intelligent friend who has never studied this topic.
+Use "you" and "we" to engage the reader. Short sentences. Active voice.
+Be factual and precise, but lead with intuition, not formalism.
 """
 
 _OUTLINE_SYSTEM = """\
 You are a video script writer for math/physics explainer videos in the style of 3Blue1Brown.
-You create scene-by-scene outlines that build intuition progressively.
+You are a master storyteller: every video opens with a hook, builds mystery, then delivers the
+"aha" moment. Narration sounds like natural spoken conversation — warm, curious, never dry.
 You return valid JSON only: no markdown, no prose, no comments.
 """
 
@@ -62,6 +68,16 @@ Create a scene-by-scene outline for a 3-5 minute explainer video. Each scene is 
 KEY PRINCIPLE: Within a scene, objects persist and transform — no hard cuts between beats.
 Each beat = one visual transition. The animation is continuous (like 3Blue1Brown).
 
+STORYTELLING PRINCIPLES — follow these for every scene:
+- Scene 1 MUST open with a hook: a surprising question, a puzzle, or a relatable everyday
+  situation that makes the viewer think "huh, I never thought about that."
+- Use analogies before equations. Say "think of it like a spinning top" BEFORE showing math.
+- Speak in "you" and "we": "You might think...", "What if we tried...", "Here's the twist."
+- Build tension: introduce a problem or question early, let it breathe, then resolve it.
+- Reveal the insight gradually — do NOT explain everything in the first beat.
+- Short, punchy sentences. Avoid academic phrasing. No "therefore", "thus", "it is evident".
+- End each scene with a satisfying payoff line or a teaser for the next scene.
+
 LANGUAGE REQUIREMENT: Write ALL narration text in "{language}". This is critical — the
 narration will be passed directly to a TTS engine that speaks in "{language}".
 
@@ -70,7 +86,7 @@ Output JSON array of scenes:
   {{
     "id": "s01",
     "order": 1,
-    "narration": "Full narration in {language} for the entire scene/chapter...",
+    "narration": "Full narration in {language} for the entire scene/chapter. Should sound like natural spoken storytelling, not a lecture.",
     "visual_type": "manim",
     "visual_spec": "Overall visual description of the continuous animation",
     "beats": [
@@ -79,14 +95,20 @@ Output JSON array of scenes:
         "order": 1,
         "trigger_phrase": "exact substring from narration that starts this beat (in {language})",
         "visual_action": "describe what Manim animates: Create/Transform/FadeOut/etc",
-        "narration_segment": "the portion of narration this beat covers (in {language})"
+        "narration_segment": "the portion of narration this beat covers (in {language})",
+        "must_show": ["concrete visual object/change that must appear", "second required visual element"],
+        "on_screen_label": "short label/formula to display, or empty string",
+        "forbidden_visuals": ["visuals that would contradict this beat or confuse the concept"]
       }},
       {{
         "id": "s01_b02",
         "order": 2,
         "trigger_phrase": "another exact substring (in {language})",
         "visual_action": "next animation step, building on previous objects",
-        "narration_segment": "next portion of narration (in {language})"
+        "narration_segment": "next portion of narration (in {language})",
+        "must_show": ["exact visual evidence for this spoken idea"],
+        "on_screen_label": "short label/formula to display, or empty string",
+        "forbidden_visuals": ["unrelated diagrams", "objects not mentioned by this beat"]
       }}
     ]
   }},
@@ -99,8 +121,16 @@ RULES:
 - Beats should be ordered to match narration flow
 - visual_action describes WHAT changes, referencing objects from previous beats
 - narration_segments concatenated = full narration (no gaps, no overlap)
+- must_show lists 1-3 CONCEPT-LEVEL visual elements that make the narration_segment
+  visibly true on screen. Write what the viewer should understand, not pixel specs:
+  GOOD: "accuracy bar drops noticeably", "grid grows denser", "two curves diverge"
+  BAD: "needle drops from 90 to 60", "patches become blurry", "label shows '60%'"
+  Never specify exact percentages, pixel effects (blur/glow), or verbatim label strings.
+  Effects like blur, glow, pixelation are unreliable in Manim — use visual metaphors.
+- on_screen_label is short: 1-6 words or one compact formula; use empty string if none
+- forbidden_visuals lists visuals that would mismatch or overgeneralize this beat
 - visual_type: manim (math/geometry), chart (data), title_card (intro/outro)
-- narration, trigger_phrase, narration_segment MUST all be in "{language}"
+- narration, trigger_phrase, narration_segment, and on_screen_label MUST all be in "{language}"
 - Return ONLY valid JSON. Do not wrap it in markdown.
 - Escape any double quotes inside strings. Prefer plain-text math like TT-star over LaTeX.
 """
@@ -111,14 +141,30 @@ Refine this video script outline for the topic "{topic}".
 Current outline:
 {outline_json}
 
-Requirements:
-- Each narration should be natural spoken language ({language})
+NARRATION QUALITY — these are the most important requirements:
+- Every narration must sound like natural SPOKEN storytelling, not written prose or a lecture.
+  Read each line aloud in your head. If it sounds stiff or academic, rewrite it.
+- Use "you" and "we" throughout: "You might wonder...", "Let's try...", "Here's where it gets interesting."
+- Analogies and concrete examples MUST come before any equation or abstract definition.
+- Each scene should have a clear narrative arc: setup → tension → resolution (or teaser).
+- Scene 1 must open with a compelling hook — a question, a paradox, or a surprising fact.
+- End each scene on a satisfying note OR a cliffhanger that pulls into the next scene.
+- Sentences should be short and punchy. Avoid: "therefore", "thus", "it is evident", "we can observe".
+- If a concept is hard, use TWO analogies, not one. The second analogy is the insurance.
+
+STRUCTURAL REQUIREMENTS:
 - visual_spec must be detailed enough for a Manim developer to implement
-- Ensure logical flow from scene to scene
+- Ensure logical flow from scene to scene — each scene answers the question raised by the previous
 - Each scene is a chapter (30-120 seconds when spoken)
 - Each beat's trigger_phrase must be an EXACT substring of the scene narration
 - Beat narration_segments must cover the full narration without gaps
 - visual_action should reference objects created in earlier beats within the same scene
+- Each beat must include must_show, on_screen_label, and forbidden_visuals
+- must_show items must be CONCEPT-LEVEL (what concept is shown), not pixel-level specs.
+  Write what the viewer should understand, not implementation details:
+  GOOD: "accuracy bar drops noticeably", "grid grows denser", "two curves diverge"
+  BAD: "needle drops from 90 to 60", "patches become blurry", "label shows '60%'"
+  Never specify exact percentages, blur/glow effects, or verbatim label strings.
 - Total video: 3-5 minutes
 
 Return the refined JSON array only (same structure with scenes and beats).
@@ -226,6 +272,9 @@ class ScriptAgent:
                     trigger_phrase=beat_raw.get("trigger_phrase", ""),
                     visual_action=beat_raw.get("visual_action", ""),
                     narration_segment=beat_raw.get("narration_segment", ""),
+                    must_show=_as_str_list(beat_raw.get("must_show", [])),
+                    on_screen_label=beat_raw.get("on_screen_label") or None,
+                    forbidden_visuals=_as_str_list(beat_raw.get("forbidden_visuals", [])),
                 ))
 
             scenes.append(Scene(
@@ -389,3 +438,13 @@ def _first_scene_array(payload: dict) -> list:
             if nested:
                 return nested
     return []
+
+
+def _as_str_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []

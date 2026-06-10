@@ -4,7 +4,10 @@
       "Bash(New-Item -ItemType Directory -Path \"C:\\\\Users\\\\qtphan\\\\Desktop\\\\video-edit-workflow-agent\\\\.claude\\\\skills\\\\manim-scene\" -Force)",
       "Bash(Out-Null)",
       "Bash(New-Item -ItemType Directory -Path \"C:\\\\Users\\\\qtphan\\\\Desktop\\\\video-edit-workflow-agent\\\\.claude\\\\skills\\\\sandbox-run\" -Force)",
-      "Bash(Write-Output \"done\")"
+      "Bash(Write-Output \"done\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app/agents/manim_codegen.py'\\).read\\(\\)\\); print\\('AST OK'\\)\")",
+      "Bash(python -c \"from app.agents.manim_codegen import render_scene, run_manim_codegen; print\\('imports OK'\\)\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

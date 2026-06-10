@@ -12,6 +12,7 @@ Sources: arXiv (all 4 categories), Reddit (PRAW auth OR public JSON fallback),
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import re
 from dataclasses import dataclass, field
@@ -93,8 +94,8 @@ For each topic provide:
 - difficulty: "easy" | "medium" | "hard"
 - approach: one sentence — best visual angle for Manim
 
-Respond ONLY with JSON array:
-[{{"title": "...", "trending_score": 8.5, "visualizable_score": 9, "difficulty": "medium", "approach": "..."}}]
+Respond ONLY with JSON array. Include the original "index" field from each input topic:
+[{{"index": 0, "title": "...", "trending_score": 8.5, "visualizable_score": 9, "difficulty": "medium", "approach": "..."}}]
 """
 
 
@@ -140,15 +141,16 @@ class MarketSearchAgent:
     ) -> list[TopicCandidate]:
         payload = [
             {
+                "index": i,
                 "title": t["title"],
                 "source": t["source"],
                 "engagement_signal": t.get("engagement_signal", 0),
             }
-            for t in raw_topics
+            for i, t in enumerate(raw_topics)
         ]
         interest_block = (
             f"USER INTEREST: The user is specifically interested in: {interest_prompt}\n"
-            "Boost composite_score for topics matching or related to these interests.\n\n"
+            "Boost trending_score and visualizable_score for topics matching or related to these interests.\n\n"
             if interest_prompt and interest_prompt.strip()
             else ""
         )
@@ -165,11 +167,18 @@ class MarketSearchAgent:
         )
 
         scored_raw = _parse_json_array(resp.content)
-        scored_map = {s["title"].lower(): s for s in scored_raw}
+
+        # Match by index first (most reliable), fall back to fuzzy title match
+        index_map: dict[int, dict] = {}
+        title_map: dict[str, dict] = {}
+        for s in scored_raw:
+            if "index" in s:
+                index_map[int(s["index"])] = s
+            title_map[s.get("title", "").lower().strip()] = s
 
         results = []
-        for t in raw_topics:
-            scores = scored_map.get(t["title"].lower(), {})
+        for i, t in enumerate(raw_topics):
+            scores = index_map.get(i) or _fuzzy_title_match(t["title"], title_map) or {}
             ts = float(scores.get("trending_score", 5.0))
             vs = float(scores.get("visualizable_score", 5.0))
             results.append(TopicCandidate(
@@ -192,28 +201,15 @@ async def _fetch_arxiv_topics(interest_prompt: str | None = None) -> list[dict]:
     topics = []
     try:
         import arxiv
-        # Fix: all 4 categories, not just [:2]
-        categories = ["math.CA", "math.NA", "cs.LG", "physics.class-ph"]
         client = arxiv.Client()
-        for cat in categories:
-            search = arxiv.Search(
-                query=f"cat:{cat}",
-                max_results=5,
-                sort_by=arxiv.SortCriterion.SubmittedDate,
-            )
-            for paper in client.results(search):
-                topics.append({
-                    "title": paper.title,
-                    "source": "arxiv",
-                    "url": str(paper.entry_id),
-                    "engagement_signal": 0,   # no engagement metric for arXiv
-                })
-        # Direct interest search — adds targeted results when user has a specific interest
+
         if interest_prompt and interest_prompt.strip():
+            # User has a specific interest — prioritize it with a large result set
+            # and a high engagement signal so it dominates the ranked pool.
             try:
                 search = arxiv.Search(
                     query=interest_prompt.strip(),
-                    max_results=8,
+                    max_results=15,
                     sort_by=arxiv.SortCriterion.Relevance,
                 )
                 for paper in client.results(search):
@@ -221,10 +217,27 @@ async def _fetch_arxiv_topics(interest_prompt: str | None = None) -> list[dict]:
                         "title": paper.title,
                         "source": "arxiv",
                         "url": str(paper.entry_id),
-                        "engagement_signal": 3.0,  # mild signal boost for interest-matched papers
+                        "engagement_signal": 7.0,  # strong boost — user asked for this
                     })
             except Exception as e:
                 log.warning("market_search.arxiv_interest_failed", error=str(e))
+
+        # Always add a few recent papers from broad categories for diversity
+        categories = ["math.CA", "math.NA", "cs.LG", "physics.class-ph"]
+        for cat in categories:
+            search = arxiv.Search(
+                query=f"cat:{cat}",
+                max_results=3,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+            )
+            for paper in client.results(search):
+                topics.append({
+                    "title": paper.title,
+                    "source": "arxiv",
+                    "url": str(paper.entry_id),
+                    "engagement_signal": 0,
+                })
+
         log.info("market_search.arxiv_done", count=len(topics))
     except Exception as e:
         log.warning("market_search.arxiv_failed", error=str(e))
@@ -483,13 +496,31 @@ def _deduplicate(topics: list[dict]) -> list[dict]:
 
 
 def _parse_json_array(text: str) -> list[dict]:
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
+    """Extract first valid JSON array from LLM output. Uses raw_decode to stop at array end."""
+    # Strip markdown fences
+    stripped = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+    stripped = stripped.replace("```", "").strip()
+
+    start = stripped.find("[")
+    if start == -1:
         return []
     try:
-        return json.loads(match.group())
+        decoder = json.JSONDecoder()
+        parsed, _ = decoder.raw_decode(stripped, start)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
     except json.JSONDecodeError:
-        return []
+        pass
+    return []
+
+
+def _fuzzy_title_match(title: str, title_map: dict[str, dict]) -> dict | None:
+    """Return the best-matching scored entry for a raw title, or None if below threshold."""
+    key = title.lower().strip()
+    if key in title_map:
+        return title_map[key]
+    matches = difflib.get_close_matches(key, title_map.keys(), n=1, cutoff=0.6)
+    return title_map[matches[0]] if matches else None
 
 
 def _parse_json_array_strings(text: str) -> list[str]:

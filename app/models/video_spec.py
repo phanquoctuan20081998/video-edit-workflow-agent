@@ -66,6 +66,9 @@ class Beat(BaseModel):
     trigger_phrase: str  # substring of narration that starts this beat
     visual_action: str  # describes the Manim animation for this beat
     narration_segment: str  # the portion of narration this beat covers
+    must_show: list[str] = Field(default_factory=list)
+    on_screen_label: Optional[str] = None
+    forbidden_visuals: list[str] = Field(default_factory=list)
 
     # Filled by beat timing resolver (after voiceover)
     start_sec: Optional[float] = None

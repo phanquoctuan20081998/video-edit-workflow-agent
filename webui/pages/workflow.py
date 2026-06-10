@@ -182,28 +182,6 @@ def _live_pipeline() -> None:
     leg_cols[2].markdown("🟢 **Done**")
     leg_cols[3].markdown("🔴 **Failed**")
 
-    st.divider()
-
-    st.subheader("Stage Details")
-    cols = st.columns(3)
-    for i, (stage, status) in enumerate(zip(_STAGES, statuses)):
-        col = cols[i % 3]
-        status_emoji = {"pending": "⏳", "running": "⚡", "done": "✅", "failed": "❌"}.get(status, "—")
-        hitl_tag = " · **HITL**" if stage["hitl"] else ""
-        with col:
-            st.markdown(f"""
-**Stage {stage['num']} — {stage['name']}** {status_emoji}
-{stage['desc']}{hitl_tag}
-""")
-
-    st.divider()
-
-    st.subheader("Quick Navigate")
-    nav_cols = st.columns(3)
-    nav_cols[0].info("**Topic Search** → Stage 1  \nRun market search, view history, pick a topic.")
-    nav_cols[1].info("**Script** → Stage 2  \nGenerate & edit VideoSpec with scenes and beats.")
-    nav_cols[2].info("**Scene QA** → Stage 3  \nRun Manim codegen, review renders, pick best variant.")
-
     st.success(
         f"Active project: **{proj.get('topic', '—')}** "
         f"({proj.get('language','').upper()}) — status: **{project_status or '—'}**"

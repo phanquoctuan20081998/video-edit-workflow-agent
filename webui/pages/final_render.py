@@ -56,6 +56,7 @@ def _submit_render(run_key: str, spec_dict: dict, pid: str) -> None:
             from app.pipeline.voiceover import run_voiceover
             from app.pipeline.composite import run_composite
             from app.pipeline.render import run_render
+            from webui.storage import update_project_status
 
             cfg = get_settings()
             spec = VideoSpec.model_validate(spec_dict)
@@ -64,12 +65,14 @@ def _submit_render(run_key: str, spec_dict: dict, pid: str) -> None:
             store[run_key]["log"].append(f"TTS for {len(spec.scenes)} scenes…")
             spec = asyncio.run(run_voiceover(spec, artifact_dir=cfg.artifact_dir))
             spec.status = ProjectStatus.voiced
+            update_project_status(pid, ProjectStatus.voiced.value)
             store[run_key]["log"].append("Voiceover done.")
 
             store[run_key]["stage"] = "Compositing scene clips"
             store[run_key]["log"].append("Assembling timeline…")
             composite_path = asyncio.run(run_composite(spec, artifact_dir=cfg.artifact_dir))
             spec.status = ProjectStatus.composited
+            update_project_status(pid, ProjectStatus.composited.value)
             store[run_key]["log"].append("Composite done.")
 
             store[run_key]["stage"] = "Muxing final video"
@@ -79,6 +82,7 @@ def _submit_render(run_key: str, spec_dict: dict, pid: str) -> None:
             )
             spec.final_video_path = final_path
             spec.status = ProjectStatus.rendered
+            update_project_status(pid, ProjectStatus.rendered.value)
             store[run_key]["log"].append("Render done.")
 
             store[run_key] = {"status": "done", "spec_dict": spec.model_dump(), "final_path": final_path, "pid": pid}

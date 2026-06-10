@@ -280,12 +280,13 @@ def render() -> None:
             left, right = st.columns([2, 3])
 
             with left:
+                clip_path = scene.clip_path
+                qa_passed = scene.clip_qa_passed
+
                 if regen_running:
                     st.info("⏳ Re-generating in background — see banner above.")
                     all_approved = False
                 else:
-                    clip_path = scene.clip_path
-                    qa_passed = scene.clip_qa_passed
 
                     if scene_renders:
                         render_labels = [
@@ -320,9 +321,12 @@ def render() -> None:
                         st.info("Not rendered yet." if not scene.manim_code else "Render failed. Check the generated Manim code below.")
                         all_approved = False
 
-                override_pass = st.checkbox("Manually approve this scene", key=f"approve_{scene.id}")
-                if override_pass and scene.clip_path and Path(scene.clip_path).exists():
-                    scene.clip_qa_passed = True
+                clip_exists = bool(clip_path and Path(clip_path).exists())
+                override_pass = False
+                if clip_exists and not qa_passed:
+                    override_pass = st.checkbox("Manually approve this scene (QA failed)", key=f"approve_{scene.id}")
+                    if override_pass:
+                        scene.clip_qa_passed = True
 
             with right:
                 st.markdown(f"**Narration:** {scene.narration}")
@@ -337,7 +341,7 @@ def render() -> None:
                     with st.expander("Manim code"):
                         st.code(scene.manim_code, language="python")
 
-                if not scene.clip_qa_passed and not override_pass:
+                if not (scene.clip_qa_passed or override_pass):
                     all_approved = False
                     if regen_running:
                         st.caption("Re-generating in background — see banner above.")

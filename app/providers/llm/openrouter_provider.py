@@ -121,6 +121,12 @@ class OpenRouterProvider(LLMProvider):
         return _parse_response(data, self._model)
 
 
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks that DeepSeek/R1 models emit before their answer."""
+    import re
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def _parse_response(data: dict, default_model: str) -> LLMResponse:
     try:
         choice = data.get("choices", [])[0]
@@ -138,6 +144,7 @@ def _parse_response(data: dict, default_model: str) -> LLMResponse:
                 content = str(content_obj)
         else:
             content = str(message)
+        content = _strip_thinking(content)
 
         model = data.get("model", default_model)
         usage = data.get("usage", {}) or {}
