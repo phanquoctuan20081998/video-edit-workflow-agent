@@ -188,6 +188,24 @@ def _live_pipeline() -> None:
     )
 
 
+_NEXT_STEP = {
+    # status → (stage page label, human instruction)
+    "searching":   ("🔍  Topic Search", "Run topic search and pick a topic."),
+    "searched":    ("🔍  Topic Search", "Review topic candidates and approve one."),
+    "scripting":   ("📝  Script",       "Script generation is running — review it when done."),
+    "scripted":    ("📝  Script",       "Review and approve the generated script."),
+    "approved":    ("🎬  Scene QA",     "Script approved — start Manim animation and review scenes."),
+    "animating":   ("🎬  Scene QA",     "Animation is rendering — review scenes as they finish."),
+    "animated":    ("🔊  Voiceover",    "Scenes ready — generate the voiceover."),
+    "voicing":     ("🔊  Voiceover",    "Voiceover is being synthesized."),
+    "voiced":      ("🔊  Voiceover",    "Voiceover done — run composite and final render."),
+    "compositing": ("🔊  Voiceover",    "Compositing clips with narration timing…"),
+    "composited":  ("🔊  Voiceover",    "Composite done — run the final render."),
+    "rendering":   ("🔊  Voiceover",    "Final render in progress…"),
+    "rendered":    ("🔊  Voiceover",    "Done! Preview and download the final video."),
+}
+
+
 def render() -> None:
     st.title("Pipeline Workflow")
     st.caption("Live view of the 6-stage video production pipeline. Auto-refreshes every 3s.")
@@ -198,3 +216,31 @@ def render() -> None:
         return
 
     _live_pipeline()
+
+    # ── Guided next step ──────────────────────────────────────────────────────
+    st.divider()
+    status = proj.get("status", "searching")
+    page_label, instruction = _NEXT_STEP.get(
+        status, ("🔍  Topic Search", "Start with a topic search.")
+    )
+
+    cta_cols = st.columns([3, 1])
+    cta_cols[0].markdown(f"**Next step:** {instruction}")
+    if cta_cols[1].button(f"Go to {page_label.split('  ')[-1]} →", type="primary",
+                          key="workflow_next_step", use_container_width=True):
+        st.session_state["pending_stage_nav"] = page_label
+        st.rerun()
+
+    # ── Per-scene status summary (when a spec exists) ─────────────────────────
+    spec_dict = st.session_state.get("approved_spec") or st.session_state.get("draft_spec")
+    if spec_dict and spec_dict.get("scenes"):
+        with st.expander(f"📊 Scene status ({len(spec_dict['scenes'])} scenes)", expanded=False):
+            for s in sorted(spec_dict["scenes"], key=lambda x: x.get("order", 0)):
+                anim = "✅" if s.get("clip_qa_passed") else ("⚠️" if s.get("clip_path") else "—")
+                voice = "✅" if s.get("duration_sec") else "—"
+                dur = f"{s['duration_sec']:.0f}s" if s.get("duration_sec") else ""
+                st.markdown(
+                    f"`{s.get('id','?')}` · {s.get('visual_type','?')} · "
+                    f"animation {anim} · voice {voice} {dur} · "
+                    f"{len(s.get('beats', []))} beats"
+                )

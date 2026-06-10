@@ -26,6 +26,7 @@ class VisualType(str, Enum):
 
 
 class ProjectStatus(str, Enum):
+    searching = "searching"
     searched = "searched"
     scripted = "scripted"
     approved = "approved"
@@ -93,6 +94,7 @@ class Scene(BaseModel):
     manim_code_hash: Optional[str] = None
     clip_path: Optional[str] = None
     clip_qa_passed: Optional[bool] = None
+    beat_render_durations: Optional[list[float]] = None  # parsed from manim code per beat
 
     # Stage 4 — Voiceover (source of truth for timeline)
     audio_path: Optional[str] = None
@@ -131,7 +133,9 @@ class Scene(BaseModel):
     @property
     def beats_timed(self) -> bool:
         """True if all beats have timing resolved from word timestamps."""
-        return self.has_beats and all(b.start_sec is not None for b in self.beats)
+        return self.has_beats and all(
+            b.start_sec is not None and b.duration_sec is not None for b in self.beats
+        )
 
 
 class VideoSpec(BaseModel):
@@ -146,6 +150,10 @@ class VideoSpec(BaseModel):
     subtitle_style: SubtitleStyle = Field(default_factory=SubtitleStyle)
     final_video_path: Optional[str] = None
 
+    # Target total video length (seconds). The script agent budgets narration
+    # word counts against this; composite stage reports drift. None = no target.
+    target_duration_sec: Optional[float] = None
+
     def get_scene(self, scene_id: str) -> Scene:
         for s in self.scenes:
             if s.id == scene_id:
@@ -158,3 +166,30 @@ class VideoSpec(BaseModel):
 
     def all_scenes_voiced(self) -> bool:
         return all(s.duration_sec is not None for s in self.scenes)
+
+    def estimated_duration_sec(self) -> float:
+        """Estimate total runtime from narration word counts (or real TTS durations).
+
+        Scenes already voiced use their real duration_sec. Unvoiced scenes are
+        estimated from word count at a language-specific speaking rate.
+        """
+        total = 0.0
+        wps = words_per_second(self.language)
+        for s in self.scenes:
+            if s.duration_sec and s.duration_sec > 0:
+                total += s.duration_sec
+            else:
+                total += len(s.narration.split()) / wps if s.narration else 0.0
+        return round(total, 1)
+
+
+# Approximate TTS speaking rates (words/minute) per language. Used to budget
+# narration length against target_duration_sec before any audio exists.
+_LANG_WPM: dict[str, int] = {
+    "en": 150, "vi": 160, "fr": 160, "de": 130, "es": 165,
+    "ja": 115, "zh": 110, "ko": 120,
+}
+
+
+def words_per_second(language: str) -> float:
+    return _LANG_WPM.get(language, 150) / 60.0

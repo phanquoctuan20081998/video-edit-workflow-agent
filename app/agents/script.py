@@ -62,8 +62,15 @@ Based on this research about "{topic}":
 
 {research}
 
-Create a scene-by-scene outline for a 3-5 minute explainer video. Each scene is a
+Create a scene-by-scene outline for a {duration_target} explainer video. Each scene is a
 "chapter" lasting 30-120 seconds with MULTIPLE visual beats that flow continuously.
+
+LENGTH BUDGET (HARD REQUIREMENT):
+- Target total video length: {duration_target}.
+- Total narration across ALL scenes must be approximately {word_budget} words
+  (TTS speaks ~{wpm} words/minute in "{language}"). Stay within ±10% of this budget.
+- Distribute the word budget across scenes; state fewer ideas rather than rushing many.
+</LENGTH BUDGET>
 
 KEY PRINCIPLE: Within a scene, objects persist and transform — no hard cuts between beats.
 Each beat = one visual transition. The animation is continuous (like 3Blue1Brown).
@@ -165,7 +172,8 @@ STRUCTURAL REQUIREMENTS:
   GOOD: "accuracy bar drops noticeably", "grid grows denser", "two curves diverge"
   BAD: "needle drops from 90 to 60", "patches become blurry", "label shows '60%'"
   Never specify exact percentages, blur/glow effects, or verbatim label strings.
-- Total video: 3-5 minutes
+- Total video length: {duration_target}. Total narration across all scenes must be
+  approximately {word_budget} words (±10%). Trim or expand narration to fit.
 
 Return the refined JSON array only (same structure with scenes and beats).
 Return ONLY valid JSON. Do not wrap it in markdown. Escape any double quotes inside strings.
@@ -240,12 +248,16 @@ class ScriptAgent:
         outline: list[dict],
         sources: list[Source],
         language: str = "vi",
+        target_duration_sec: float | None = None,
     ) -> VideoSpec:
         """Refine outline and emit VideoSpec."""
+        duration_target, word_budget, _wpm = _duration_budget(target_duration_sec, language)
         prompt = _SCRIPT_REFINE_PROMPT.format(
             topic=topic,
             outline_json=json.dumps(outline, ensure_ascii=False, indent=2),
             language=language,
+            duration_target=duration_target,
+            word_budget=word_budget,
         )
         resp = await self._llm.complete(
             [LLMMessage(role="user", content=prompt)],
@@ -294,6 +306,7 @@ class ScriptAgent:
             language=language,
             source_refs=[s.url for s in sources if s.url],
             scenes=scenes,
+            target_duration_sec=target_duration_sec,
         )
         log.info("script.spec_emitted", project_id=spec.project_id, scenes=len(scenes),
                  total_beats=sum(len(s.beats) for s in scenes))
@@ -331,6 +344,7 @@ class ScriptAgent:
         topic: str,
         language: str = "en",
         max_judge_reflections: int = 3,
+        target_duration_sec: float | None = None,
     ) -> VideoSpec:
         """Full pipeline: research → outline → VideoSpec → judge → [reflect + retry].
 
@@ -341,8 +355,14 @@ class ScriptAgent:
         from app.agents.spec_judge import judge_spec
 
         research, sources = await self.research(topic)
-        outline = await self.outline(topic, research, language=language)
-        spec = await self.write_spec(topic, outline, sources, language=language)
+        outline = await self.outline(
+            topic, research, language=language, target_duration_sec=target_duration_sec,
+        )
+        spec = await self.write_spec(
+            topic, outline, sources, language=language,
+            target_duration_sec=target_duration_sec,
+        )
+        spec = await self._fit_to_duration(spec, topic, language)
 
         # Judge + reflect loop
         for attempt in range(max_judge_reflections):
@@ -368,10 +388,110 @@ class ScriptAgent:
             )
             if reflected_outline:
                 outline = reflected_outline
-                spec = await self.write_spec(topic, outline, sources, language=language)
+                spec = await self.write_spec(
+                    topic, outline, sources, language=language,
+                    target_duration_sec=target_duration_sec,
+                )
+                spec = await self._fit_to_duration(spec, topic, language)
 
         log.warning("script.judge_cap_reached", topic=topic, max=max_judge_reflections)
         return spec
+
+
+    async def _fit_to_duration(self, spec: VideoSpec, topic: str, language: str) -> VideoSpec:
+        """If narration deviates >20% from target_duration_sec, rewrite narration to fit.
+
+        One pass only — trims (or expands) each scene's narration while keeping
+        beat structure intact. trigger_phrase / narration_segment are re-derived
+        by the LLM so they stay exact substrings of the new narration.
+        """
+        target = spec.target_duration_sec
+        if not target:
+            return spec
+
+        estimated = spec.estimated_duration_sec()
+        if estimated <= 0:
+            return spec
+        drift = (estimated - target) / target
+        if abs(drift) <= 0.20:
+            log.info("script.duration_ok", estimated=estimated, target=target)
+            return spec
+
+        from app.models.video_spec import words_per_second
+        word_budget = int(target * words_per_second(language))
+        direction = "SHORTEN" if drift > 0 else "EXPAND"
+        log.info("script.duration_fit", estimated=estimated, target=target, action=direction)
+
+        prompt = f"""\
+The following video script is estimated at {estimated:.0f}s but the target length is
+{target:.0f}s. {direction} the narration of each scene so the TOTAL narration is
+approximately {word_budget} words (current total: {sum(len(s.narration.split()) for s in spec.scenes)} words).
+
+Rules:
+- Keep the same scenes and the same beat structure (same beat ids and order).
+- Rewrite narration naturally — do not just delete sentence halves.
+- After rewriting, update each beat's trigger_phrase and narration_segment so that
+  trigger_phrase is an EXACT substring of the new narration and the
+  narration_segments concatenate to cover the full new narration.
+- All text stays in "{language}".
+
+Script JSON:
+{{script_json}}
+
+Return ONLY the corrected JSON array of scenes. No markdown fences.
+"""
+        import json as _json
+        scenes_json = _json.dumps(
+            [s.model_dump(include={"id", "order", "narration", "visual_type", "visual_spec", "beats"})
+             for s in spec.scenes],
+            ensure_ascii=False, default=str,
+        )
+        try:
+            resp = await self._llm.complete(
+                [LLMMessage(role="user", content=prompt.replace("{script_json}", scenes_json))],
+                system=_OUTLINE_SYSTEM,
+                max_tokens=65000,
+                temperature=0.3,
+            )
+            fixed = await self._parse_or_repair_json_array(resp.content, step="duration_fit")
+        except ScriptGenerationError as e:
+            log.warning("script.duration_fit_failed", error=str(e))
+            return spec
+        if not fixed:
+            return spec
+
+        new_spec = await self._scenes_from_raw(fixed, spec)
+        new_est = new_spec.estimated_duration_sec()
+        log.info("script.duration_fit_done", old=estimated, new=new_est, target=target)
+        return new_spec
+
+    async def _scenes_from_raw(self, raw_scenes: list[dict], base_spec: VideoSpec) -> VideoSpec:
+        """Rebuild scenes (with beats) from raw dicts, preserving spec metadata."""
+        scenes = []
+        for i, raw in enumerate(raw_scenes):
+            beats = []
+            for j, beat_raw in enumerate(raw.get("beats", [])):
+                beats.append(Beat(
+                    id=beat_raw.get("id", f"s{i+1:02d}_b{j+1:02d}"),
+                    order=beat_raw.get("order", j + 1),
+                    trigger_phrase=beat_raw.get("trigger_phrase", ""),
+                    visual_action=beat_raw.get("visual_action", ""),
+                    narration_segment=beat_raw.get("narration_segment", ""),
+                    must_show=_as_str_list(beat_raw.get("must_show", [])),
+                    on_screen_label=beat_raw.get("on_screen_label") or None,
+                    forbidden_visuals=_as_str_list(beat_raw.get("forbidden_visuals", [])),
+                ))
+            scenes.append(Scene(
+                id=raw.get("id", f"s{i+1:02d}"),
+                order=raw.get("order", i + 1),
+                narration=raw.get("narration", ""),
+                visual_type=VisualType(raw.get("visual_type", "manim")),
+                visual_spec=raw.get("visual_spec", ""),
+                beats=beats,
+            ))
+        new_spec = base_spec.model_copy(deep=True)
+        new_spec.scenes = scenes
+        return new_spec
 
     async def _regenerate_with_reflection(
         self,
@@ -533,3 +653,15 @@ def _as_str_list(value) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _duration_budget(target_duration_sec: float | None, language: str) -> tuple[str, int, int]:
+    """Return (human-readable target, word budget, wpm) for prompt injection."""
+    from app.models.video_spec import _LANG_WPM
+    wpm = _LANG_WPM.get(language, 150)
+    if not target_duration_sec:
+        # Default behaviour unchanged: 3-5 minute video, budget at 4 min midpoint
+        return "3-5 minute", wpm * 4, wpm
+    minutes = target_duration_sec / 60.0
+    label = f"~{minutes:.1f} minute ({target_duration_sec:.0f} second)"
+    return label, int(minutes * wpm), wpm

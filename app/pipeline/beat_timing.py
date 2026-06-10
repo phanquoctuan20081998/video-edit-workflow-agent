@@ -1,17 +1,20 @@
-"""Beat timing resolver — matches trigger phrases to word timestamps.
+"""Beat timing resolver — matches beats to word timestamps.
 
 After TTS (Stage 4), each scene has word_timestamps. This module maps each beat's
-trigger_phrase to a start time within the audio, enabling intra-scene sync.
+start time within the audio, enabling intra-scene sync.
 
-Strategy:
-  1. Concatenate word timestamps into running text with positions
-  2. Find trigger_phrase onset via substring match (exact first, fuzzy fallback)
-  3. Assign each beat: start_sec, duration_sec
+Strategy (in priority order):
+  1. narration_segment exact match — the full beat text, unambiguous, long
+  2. trigger_phrase exact match — shorter, may be ambiguous
+  3. trigger_phrase fuzzy (token Jaccard, threshold 0.7)
+  4. Fallback: distribute beats equally across scene duration
 
 Fallback: if matching fails, distribute beats equally across scene duration.
 """
 
 from __future__ import annotations
+
+import re
 
 import structlog
 
@@ -19,11 +22,24 @@ from app.models.video_spec import Beat, Scene, VideoSpec, WordTimestamp
 
 log = structlog.get_logger()
 
+# Strip punctuation so narration text ("Vậy, điều gì xảy ra?") matches the TTS
+# word stream ("Vậy điều gì xảy ra"). Mismatched punctuation was the #1 cause
+# of beats falling back to equal distribution (= audio/visual desync).
+_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace."""
+    return re.sub(r"\s+", " ", _PUNCT_RE.sub(" ", text.lower())).strip()
+
 
 def resolve_beat_timing(spec: VideoSpec) -> VideoSpec:
     """Resolve beat timing for all scenes that have beats and word timestamps."""
     for scene in spec.scenes:
         if not scene.has_beats or not scene.word_timestamps:
+            continue
+        if scene.beats_timed:
+            log.info("beat_timing.skip_already_timed", scene_id=scene.id)
             continue
         _resolve_scene_beats(scene)
     return spec
@@ -35,15 +51,15 @@ def _resolve_scene_beats(scene: Scene) -> None:
     if not words:
         return
 
-    # Build character-to-time mapping from word timestamps
+    # Build character-to-time mapping from NORMALIZED word timestamps
     char_positions = _build_char_positions(words)
-    full_text = " ".join(w.word for w in words).lower()
+    full_text = " ".join(_normalize(w.word) for w in words if _normalize(w.word))
 
     beats_sorted = sorted(scene.beats, key=lambda b: b.order)
     matched_starts: list[float | None] = []
 
     for beat in beats_sorted:
-        start_sec = _find_phrase_onset(beat.trigger_phrase, full_text, char_positions)
+        start_sec = _find_beat_onset(beat, full_text, char_positions)
         matched_starts.append(start_sec)
 
     # Fill unmatched beats and compute durations
@@ -60,17 +76,48 @@ def _resolve_scene_beats(scene: Scene) -> None:
 def _build_char_positions(words: list[WordTimestamp]) -> list[tuple[int, int, float, float]]:
     """Build mapping: (char_start, char_end, time_start, time_end) for each word.
 
-    We reconstruct the full text as space-joined words and track character offsets.
+    We reconstruct the full text as space-joined NORMALIZED words and track
+    character offsets. Punctuation-only tokens are skipped so offsets line up
+    with the normalized full_text used for matching.
     """
     positions = []
     char_offset = 0
     for w in words:
-        word_lower = w.word.lower()
+        word_norm = _normalize(w.word)
+        if not word_norm:
+            continue  # punctuation-only token
         char_start = char_offset
-        char_end = char_offset + len(word_lower)
+        char_end = char_offset + len(word_norm)
         positions.append((char_start, char_end, w.start, w.end))
         char_offset = char_end + 1  # +1 for the space
     return positions
+
+
+def _find_beat_onset(
+    beat: Beat,
+    full_text: str,
+    char_positions: list[tuple[int, int, float, float]],
+) -> float | None:
+    """Find the start time of a beat in the word timeline.
+
+    Priority:
+    1. narration_segment exact match (full beat text — long, unique, most reliable)
+    2. trigger_phrase exact match
+    3. trigger_phrase fuzzy token overlap (Jaccard >= 0.7)
+    """
+    # Strategy 1: narration_segment exact match (primary — VideoAgent-inspired)
+    segment_norm = _normalize(beat.narration_segment)
+    if segment_norm:
+        # Use first N words of the segment (up to ~8 words) for matching,
+        # since TTS may paraphrase slightly at segment boundaries
+        segment_words = segment_norm.split()
+        anchor = " ".join(segment_words[:min(8, len(segment_words))])
+        idx = full_text.find(anchor)
+        if idx != -1:
+            return _char_offset_to_time(idx, char_positions)
+
+    # Strategy 2: trigger_phrase exact match
+    return _find_phrase_onset(beat.trigger_phrase, full_text, char_positions)
 
 
 def _find_phrase_onset(
@@ -78,22 +125,18 @@ def _find_phrase_onset(
     full_text: str,
     char_positions: list[tuple[int, int, float, float]],
 ) -> float | None:
-    """Find the start time of a trigger phrase in the word timeline.
-
-    Strategy 1: Exact substring match (fast, works for most cases).
-    Strategy 2: Token overlap sliding window (handles minor TTS differences).
-    """
-    phrase_lower = trigger_phrase.lower().strip()
-    if not phrase_lower:
+    """Find the start time of a trigger phrase in the word timeline."""
+    phrase_norm = _normalize(trigger_phrase)
+    if not phrase_norm:
         return None
 
-    # Strategy 1: Exact substring
-    idx = full_text.find(phrase_lower)
+    # Exact substring
+    idx = full_text.find(phrase_norm)
     if idx != -1:
         return _char_offset_to_time(idx, char_positions)
 
-    # Strategy 2: Token-level sliding window with Jaccard similarity
-    return _fuzzy_match_onset(phrase_lower, full_text, char_positions)
+    # Fuzzy token overlap (raised threshold: 0.7)
+    return _fuzzy_match_onset(phrase_norm, full_text, char_positions)
 
 
 def _char_offset_to_time(
@@ -104,10 +147,8 @@ def _char_offset_to_time(
     for char_start, char_end, time_start, _ in char_positions:
         if char_start <= char_offset < char_end:
             return time_start
-        # Character falls in a space between words — use next word's start
         if char_offset == char_end:
             continue
-    # Past all words — return last word's start
     if char_positions:
         return char_positions[-1][2]
     return None
@@ -117,7 +158,7 @@ def _fuzzy_match_onset(
     phrase: str,
     full_text: str,
     char_positions: list[tuple[int, int, float, float]],
-    threshold: float = 0.5,
+    threshold: float = 0.7,
 ) -> float | None:
     """Sliding window token overlap match for fuzzy phrase finding."""
     phrase_tokens = set(phrase.split())
@@ -132,7 +173,6 @@ def _fuzzy_match_onset(
     char_offset = 0
     for i in range(len(words_in_text) - window_size + 1):
         window = set(words_in_text[i : i + window_size])
-        # Jaccard similarity
         intersection = len(phrase_tokens & window)
         union = len(phrase_tokens | window)
         score = intersection / union if union > 0 else 0.0

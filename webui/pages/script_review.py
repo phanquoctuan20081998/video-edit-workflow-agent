@@ -46,7 +46,9 @@ def _script_running_poll(run_key: str) -> None:
         st.rerun()
 
 
-def _start_script_task(run_key: str, topic: str, language: str) -> None:
+def _start_script_task(
+    run_key: str, topic: str, language: str, target_duration_sec: float | None = None
+) -> None:
     store = _script_store()
     store[run_key] = {"status": "running", "log": [], "started_at": time.monotonic()}
 
@@ -57,7 +59,15 @@ def _start_script_task(run_key: str, topic: str, language: str) -> None:
             store[run_key]["log"].append("Initializing script agent…")
             agent = ScriptAgent()
             store[run_key]["log"].append(f"Researching topic: {topic!r}…")
-            spec = asyncio.run(agent.run(topic=topic, language=language))
+            if target_duration_sec:
+                store[run_key]["log"].append(
+                    f"Target length: {target_duration_sec / 60:.1f} min"
+                )
+            spec = asyncio.run(agent.run(
+                topic=topic,
+                language=language,
+                target_duration_sec=target_duration_sec,
+            ))
             store[run_key]["log"].append(f"Writing scenes ({language})…")
             store[run_key]["log"].append(f"Generated {len(spec.scenes)} scenes with beats")
             store[run_key] = {"status": "done", "spec": spec.model_dump()}
@@ -140,16 +150,31 @@ def render() -> None:
             del store[run_key]
             st.session_state.pop("script_run_key", None)
 
-    # ── Generate button ───────────────────────────────────────────────────────
-    if st.button("Generate Script", type="primary"):
-        key = str(uuid.uuid4())[:8]
-        st.session_state["script_run_key"] = key
-        pid = proj.get("project_id", "")
-        if pid:
-            save_project(pid, topic, language, "scripting")
-            st.session_state["current_project"]["status"] = "scripting"
-        _start_script_task(key, topic, language)
-        st.rerun()
+    # ── Generate controls ─────────────────────────────────────────────────────
+    gen_cols = st.columns([2, 3])
+    with gen_cols[1]:
+        target_min = st.slider(
+            "🎯 Target video length (minutes)",
+            min_value=1.0, max_value=15.0,
+            value=float(st.session_state.get("target_minutes", 4.0)),
+            step=0.5,
+            help=(
+                "The script agent budgets narration word counts against this length "
+                "and rewrites the script once if the estimate drifts more than 20%."
+            ),
+            key="target_minutes",
+        )
+    with gen_cols[0]:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        if st.button("Generate Script", type="primary"):
+            key = str(uuid.uuid4())[:8]
+            st.session_state["script_run_key"] = key
+            pid = proj.get("project_id", "")
+            if pid:
+                save_project(pid, topic, language, "scripting")
+                st.session_state["current_project"]["status"] = "scripting"
+            _start_script_task(key, topic, language, target_duration_sec=target_min * 60)
+            st.rerun()
 
     st.divider()
 
@@ -183,22 +208,39 @@ def render() -> None:
     spec = VideoSpec.model_validate(spec_dict)
 
     active_id = st.session_state.get("active_script_id", "")
+    est_sec = spec.estimated_duration_sec()
+    est_label = f"{int(est_sec // 60)}:{int(est_sec % 60):02d}"
+    target = spec.target_duration_sec
     st.markdown(
         f"**Editing:** `{active_id[:24]}…` &nbsp;|&nbsp; "
-        f"**{len(spec.scenes)} scenes** &nbsp;|&nbsp; project `{spec.project_id[:8]}…`",
+        f"**{len(spec.scenes)} scenes** &nbsp;|&nbsp; "
+        f"⏱️ est. **{est_label}** &nbsp;|&nbsp; project `{spec.project_id[:8]}…`",
         unsafe_allow_html=True,
     )
+    if target:
+        drift = (est_sec - target) / target
+        if abs(drift) > 0.20:
+            direction = "longer" if drift > 0 else "shorter"
+            st.warning(
+                f"Estimated length is {abs(drift):.0%} {direction} than the "
+                f"{target / 60:.1f} min target. Edit narration below or regenerate."
+            )
+        else:
+            st.caption(f"✅ Within ±20% of the {target / 60:.1f} min target.")
     if not spec.scenes:
         st.error("This draft has 0 scenes. Click **Generate Script** again to create a new draft.")
         st.session_state.pop("approved_spec", None)
         return
     st.divider()
 
+    from app.models.video_spec import words_per_second
+    wps = words_per_second(spec.language)
     edited_scenes = []
     for i, scene in enumerate(spec.scenes):
+        scene_sec = scene.duration_sec or (len(scene.narration.split()) / wps)
         with st.expander(
             f"Scene {scene.order} — {scene.visual_type.value}  ·  "
-            f"{len(scene.narration.split())} words  ·  {len(scene.beats)} beats",
+            f"{len(scene.narration.split())} words (~{scene_sec:.0f}s)  ·  {len(scene.beats)} beats",
             expanded=(i < 2),
         ):
             cols = st.columns([1, 2])

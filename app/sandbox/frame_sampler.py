@@ -48,3 +48,35 @@ def _get_duration(clip_path: str) -> float:
         return float(result.stdout.strip())
     except ValueError:
         return 0.0
+
+
+def motion_score(frame_paths: list[str]) -> float:
+    """Mean absolute pixel difference between consecutive sampled frames (0-255).
+
+    A near-zero score means the rendered clip is effectively a static slide —
+    the #1 "AI slop" failure mode. Caught here it costs nothing; caught by the
+    vision QA model it costs a full vision call plus vaguer repair feedback.
+
+    Returns -1.0 if scoring is unavailable (missing deps / unreadable frames),
+    in which case callers should fall through to vision QA.
+    """
+    if len(frame_paths) < 2:
+        return -1.0
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return -1.0
+
+    try:
+        arrays = []
+        for p in frame_paths:
+            img = Image.open(p).convert("L").resize((160, 90))
+            arrays.append(np.asarray(img, dtype=np.float32))
+        diffs = [
+            float(np.abs(arrays[i + 1] - arrays[i]).mean())
+            for i in range(len(arrays) - 1)
+        ]
+        return sum(diffs) / len(diffs)
+    except Exception:
+        return -1.0

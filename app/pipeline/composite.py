@@ -3,6 +3,7 @@
 Assembles clips according to duration_sec from voiceover stage.
 For beat-aware scenes, applies per-beat time stretching to sync animation with narration.
 Raises AssertionError if any scene is missing duration_sec — voiceover MUST run first.
+Raises RuntimeError if a scene is missing clip_path — animation stage MUST run first.
 """
 
 from __future__ import annotations
@@ -67,9 +68,11 @@ def _build_scene_clip(scene: Scene) -> "VideoFileClip":
             # Simple: trim or freeze-extend to match voice duration
             clip = _simple_duration_match(clip, target_duration)
     else:
-        log.warning("composite.missing_clip", scene_id=scene.id)
-        from moviepy import ColorClip
-        clip = ColorClip(size=(1920, 1080), color=[0, 0, 0], duration=target_duration)
+        log.error("composite.missing_clip", scene_id=scene.id, clip_path=scene.clip_path)
+        raise RuntimeError(
+            f"Scene {scene.id} has no rendered clip — animation stage must complete first. "
+            f"clip_path={scene.clip_path!r}"
+        )
 
     return clip
 
@@ -87,13 +90,11 @@ def _simple_duration_match(clip, target: float):
 def _apply_beat_timing(clip, scene: Scene):
     """Apply per-beat time stretching to sync Manim animation with narration beats.
 
-    The Manim clip has natural beat boundaries (marked by self.wait() calls).
-    We estimate equal-duration segments in the source clip, then speed-adjust each
-    segment to match the narration-derived beat durations.
+    Uses scene.beat_render_durations (parsed from Manim code) when available to
+    cut the source clip at real animation boundaries. Falls back to equal division.
 
-    Strategy: Divide source clip into N equal segments (one per beat), then
-    speed-adjust each to match the narration beat duration. This is approximate
-    but handles the common case where Manim generates roughly equal-length beats.
+    Each segment is then speed-adjusted to match the narration beat duration from
+    the beat timing resolver.
     """
     n_beats = len(scene.beats)
     src_duration = clip.duration
@@ -102,33 +103,49 @@ def _apply_beat_timing(clip, scene: Scene):
     # Simple case: if total durations are close, just stretch uniformly
     ratio = target_duration / src_duration if src_duration > 0 else 1.0
     if 0.85 <= ratio <= 1.15:
-        # Within 15% — uniform speed change is good enough
         return clip.with_effects([_speed_effect(1.0 / ratio)])
 
-    # Per-beat time stretching
-    src_segment_dur = src_duration / n_beats
+    # Determine source segment boundaries
+    if scene.beat_render_durations and len(scene.beat_render_durations) == n_beats:
+        # Use actual Manim render durations (normalized to real clip length)
+        raw = scene.beat_render_durations
+        scale = src_duration / sum(raw)
+        render_durs = [d * scale for d in raw]
+    else:
+        # Fallback: equal division
+        render_durs = [src_duration / n_beats] * n_beats
+
+    # Cut source clip into segments at render boundaries
+    segments = []
+    pos = 0.0
+    for dur in render_durs:
+        end = min(pos + dur, src_duration)
+        seg_start = pos
+        seg_end = max(end, pos + 0.04)  # minimum 1 frame at 24fps
+        segments.append(clip.subclipped(seg_start, min(seg_end, src_duration)))
+        pos = end
+
+    # Speed-adjust each segment to match narration beat duration
     beat_clips = []
+    beats_sorted = sorted(scene.beats, key=lambda b: b.order)
 
-    for i, beat in enumerate(sorted(scene.beats, key=lambda b: b.order)):
-        src_start = i * src_segment_dur
-        src_end = min((i + 1) * src_segment_dur, src_duration)
-        segment = clip.subclipped(src_start, src_end)
+    for i, (segment, beat) in enumerate(zip(segments, beats_sorted)):
+        beat_target = beat.duration_sec or 0.0
+        if beat_target <= 0:
+            continue
 
-        beat_target = beat.duration_sec
-        seg_actual = src_end - src_start
+        seg_actual = segment.duration
 
-        if seg_actual > 0 and beat_target > 0:
+        if seg_actual > 0:
             speed_ratio = seg_actual / beat_target
             if 0.5 <= speed_ratio <= 2.0:
-                # Reasonable speed range — apply
                 segment = segment.with_effects([_speed_effect(speed_ratio)])
             else:
-                # Extreme ratio — clamp and freeze/trim
                 segment = _simple_duration_match(segment, beat_target)
-        elif beat_target > 0:
-            # Empty segment — black frame
-            from moviepy import ColorClip
-            segment = ColorClip(size=clip.size, color=[0, 0, 0], duration=beat_target)
+        else:
+            # Zero-length source segment — freeze last valid frame instead of black
+            freeze_t = max((i * (src_duration / n_beats)) - 0.05, 0)
+            segment = clip.to_ImageClip(t=min(freeze_t, clip.duration - 0.05)).with_duration(beat_target)
 
         beat_clips.append(segment)
 

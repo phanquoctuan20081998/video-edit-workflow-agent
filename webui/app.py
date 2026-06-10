@@ -113,13 +113,13 @@ with st.sidebar:
             new_topic = st.text_input("Project name", placeholder="e.g. Fast Fourier Transform")
             if st.form_submit_button("Create", type="primary") and new_topic.strip():
                 pid = str(uuid.uuid4())
-                save_project(pid, new_topic.strip(), "en", "searched")
+                save_project(pid, new_topic.strip(), "en", "searching")
                 _reset_project_session(st.session_state)
                 st.session_state["current_project"] = {
                     "project_id": pid,
                     "topic": new_topic.strip(),
                     "language": "en",
-                    "status": "searched",
+                    "status": "searching",
                 }
                 st.session_state["approved_topic"] = new_topic.strip()
                 st.session_state["language"] = "en"

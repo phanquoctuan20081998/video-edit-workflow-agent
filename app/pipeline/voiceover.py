@@ -29,7 +29,23 @@ async def run_voiceover(spec: VideoSpec, artifact_dir: str | None = None) -> Vid
     tts = get_tts_provider()
 
     for scene in spec.scenes:
-        if scene.audio_path and Path(scene.audio_path).exists() and scene.duration_sec and scene.duration_sec > 0:
+        if (
+            scene.audio_path
+            and Path(scene.audio_path).exists()
+            and scene.duration_sec
+            and scene.duration_sec > 0
+        ):
+            # Cached, but if word timestamps are missing the beat resolver cannot
+            # sync animation to narration — try to recover them via Whisper.
+            if scene.has_beats and not scene.word_timestamps:
+                recovered = _transcribe_word_timestamps(scene.audio_path, spec.language)
+                if recovered:
+                    scene.word_timestamps = recovered
+                    log.info(
+                        "voiceover.recovered_word_timestamps",
+                        scene_id=scene.id,
+                        words=len(recovered),
+                    )
             log.info("voiceover.skip_cached", scene_id=scene.id)
             continue
 
@@ -37,8 +53,10 @@ async def run_voiceover(spec: VideoSpec, artifact_dir: str | None = None) -> Vid
             recovered_duration = _probe_audio_duration(scene.audio_path)
             if recovered_duration > 0:
                 scene.duration_sec = recovered_duration
-                if scene.word_timestamps is None:
-                    scene.word_timestamps = []
+                if not scene.word_timestamps:
+                    scene.word_timestamps = (
+                        _transcribe_word_timestamps(scene.audio_path, spec.language) or []
+                    )
                 log.info(
                     "voiceover.recovered_cached_duration",
                     scene_id=scene.id,
@@ -75,3 +93,54 @@ def _probe_audio_duration(audio_path: str) -> float:
     if duration is None:
         return 0.0
     return round(float(duration), 3)
+
+
+def _transcribe_word_timestamps(
+    audio_path: str, language: str | None = None
+) -> list[WordTimestamp] | None:
+    """Recover word-level timestamps from audio using faster-whisper.
+
+    Used when cached audio exists but word_timestamps were lost (e.g. project
+    reloaded from disk). Without word timestamps, beat timing falls back to
+    equal distribution and the animation drifts from the narration.
+
+    Returns None if faster-whisper is unavailable or transcription fails.
+    """
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        log.warning("voiceover.whisper_unavailable", audio=audio_path)
+        return None
+
+    try:
+        model = _get_whisper_model()
+        segments, _info = model.transcribe(
+            audio_path,
+            language=(language or None) if language != "auto" else None,
+            word_timestamps=True,
+            vad_filter=True,
+        )
+        words: list[WordTimestamp] = []
+        for seg in segments:
+            for w in seg.words or []:
+                token = w.word.strip()
+                if token:
+                    words.append(
+                        WordTimestamp(word=token, start=round(w.start, 3), end=round(w.end, 3))
+                    )
+        return words or None
+    except Exception as exc:  # noqa: BLE001 — best-effort recovery
+        log.warning("voiceover.whisper_failed", audio=audio_path, error=str(exc))
+        return None
+
+
+_WHISPER_MODEL = None
+
+
+def _get_whisper_model():
+    """Lazy singleton — loading the model is slow, do it once per process."""
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        from faster_whisper import WhisperModel
+        _WHISPER_MODEL = WhisperModel("small", device="cpu", compute_type="int8")
+    return _WHISPER_MODEL

@@ -35,12 +35,16 @@ from app.config import get_settings
 from app.models.video_spec import Scene, VideoSpec
 from app.providers.base import LLMMessage
 from app.providers.factory import get_llm_provider
-from app.sandbox.frame_sampler import sample_frames
+from app.sandbox.frame_sampler import motion_score, sample_frames
 from app.sandbox.runner import SandboxResult, sandbox_exec
 
 log = structlog.get_logger()
 
 _CODEGEN_MAX_TOKENS = 12000
+
+# Mean inter-frame pixel difference (0-255) below which a clip is treated as a
+# static slide and auto-failed without spending a vision-QA call.
+_MIN_MOTION_SCORE = 1.5
 
 # Temperature escalates on repeated failures to escape local minima.
 _REPAIR_TEMPS = [0.2, 0.2, 0.5, 0.7]
@@ -51,7 +55,14 @@ _ERROR_HINTS: dict[str, str] = {
     "ValueError": "Check argument types and value ranges for Manim constructors.",
     "NameError": "Undefined name — ensure palette constants (P_BLUE etc.) are defined above the class.",
     "TypeError": "Check argument count and types for Manim constructors and methods.",
+    "IndexError": "List/array index out of range — check loop bounds and VGroup sizes.",
+    "ZeroDivisionError": "Division by zero — guard denominators (e.g. normalize only non-zero vectors).",
     "'opacity'": "VMobject does not accept opacity= as a constructor kwarg. Use fill_opacity= for fill opacity, stroke_opacity= for border opacity, or call .set_opacity(val) after creation.",
+    "ShowCreation": "ShowCreation is manimlib (old). In Manim CE use Create(...).",
+    "TextMobject": "TextMobject/TexMobject are manimlib (old). In Manim CE use Text(...) and MathTex(...).",
+    "get_graph": "axes.get_graph() is manimlib (old). In Manim CE use axes.plot(lambda x: ..., color=...).",
+    "GraphScene": "GraphScene is manimlib (old). In Manim CE subclass Scene and create Axes(...) manually.",
+    "CONFIG": "The CONFIG dict pattern is manimlib (old). In Manim CE pass options to __init__ or set them in construct().",
     "ModuleNotFoundError": "Only manim and numpy are available in the sandbox. Remove other imports.",
     "ImportError": "Only manim and numpy are available in the sandbox. Remove other imports.",
     "FileNotFoundError": "No file I/O outside /workspace is allowed.",
@@ -160,6 +171,36 @@ Pacing:
   run_time=1.0     standard; 1.5–2.0 for complex transforms; 0.5 for minor highlights
   NEVER self.wait(0)
 
+═══ POLISH (what makes it feel hand-crafted, not generated) ═══
+- Group reveals: use LaggedStart(*[Create(d) for d in dots], lag_ratio=0.1) instead of
+  revealing many similar objects in one pop.
+- Movement easing: default rate_func is fine; for sweeping motion use rate_func=smooth.
+- Keep the title on screen for the whole scene; everything else enters/leaves below it.
+- When replacing content, FadeOut(old, shift=DOWN*0.3) then bring the new in — never
+  leave orphaned objects behind a new layout.
+- Axes: always pass axis_config={"color": P_AXIS, "stroke_width": 2} so grids stay subdued.
+- One focal point per moment: when a formula is the focus, dim other objects with
+  .animate.set_opacity(0.3), then restore.
+
+═══ GOLDEN MINI-EXAMPLE (rhythm + style reference — adapt, don't copy verbatim) ═══
+class UnitCircleSine(Scene):
+    def construct(self):
+        self.camera.background_color = BACKGROUND_COLOR
+        title = Text("Where sine comes from", font_size=40, color=P_WHITE).to_edge(UP, buff=0.5)
+        self.play(Write(title)); self.wait(0.5)
+        ax = Axes(x_range=[0, 7, 1], y_range=[-1.5, 1.5, 1], x_length=6, y_length=3,
+                  axis_config={"color": P_AXIS, "stroke_width": 2}).to_edge(RIGHT, buff=0.8)
+        circle = Circle(radius=1.2, color=P_BLUE).to_edge(LEFT, buff=1.2)
+        self.play(Create(circle), run_time=1.0)
+        self.play(Create(ax), run_time=1.0); self.wait(1.0)
+        dot = Dot(circle.point_at_angle(0), color=P_YELLOW)
+        radius = Line(circle.get_center(), dot.get_center(), color=P_GREEN)
+        self.play(FadeIn(dot), Create(radius)); self.wait(0.5)
+        curve = ax.plot(lambda x: np.sin(x), color=P_BLUE)
+        label = MathTex(r"y = \\sin(\\theta)", color=P_WHITE).scale(0.8).next_to(ax, UP, buff=0.25)
+        self.play(Create(curve), Write(label), run_time=2.0)
+        self.play(Indicate(dot)); self.wait(1.0)
+
 ═══ ANTI-PATTERNS — NEVER GENERATE ═══
 ❌ self.add(obj1, obj2, obj3, obj4) — all at once, no animation
 ❌ FadeIn(equation) — use Write(equation)
@@ -248,6 +289,9 @@ Beats (in order):
 
 For every beat:
 - The animation must directly illustrate the exact Narration segment for that beat.
+- The beat's animations + waits should sum to roughly its "Target animation time".
+  Matching this keeps the animation in sync with the voiceover — segments that are
+  far off get speed-warped in compositing, which looks bad.
 - Show every item in Must show, using visible geometry, arrows, highlights, transforms,
   labels, or formulas.
 - Include the On-screen label when present, but keep it compact.
@@ -366,6 +410,10 @@ async def render_scene(
     if cached:
         log.info("manim_codegen.cache_hit", scene_id=scene.id, hash=scene.manim_code_hash)
         scene.set_clip(cached, qa_passed=True)
+        if scene.has_beats and scene.manim_code and not scene.beat_render_durations:
+            durs = _extract_beat_durations_from_code(scene.manim_code, len(scene.beats))
+            if durs:
+                scene.beat_render_durations = durs
         _emit("✅ cache hit")
         _log(f"[{scene.id}] Cache hit — skipping render")
         return RenderResult(success=True, clip_path=cached, qa_passed=True, code=scene.manim_code, attempts=0)
@@ -403,6 +451,8 @@ async def render_scene(
             sandbox_result = (
                 _syntax_check(code)
                 or _scene_subclass_check(code)
+                or _manimlib_pattern_check(code)
+                or _undefined_name_check(code)
                 or _latex_source_check(code)
                 or _mathtex_incomplete_check(code)
                 or _missing_play_check(code)
@@ -458,18 +508,39 @@ async def render_scene(
             _log(f"[{scene.id}] ✅ Sandbox OK — sampling frames for visual QA…")
             _emit("👁️ visual QA…")
             frames = sample_frames(sandbox_result.clip_path, n=4, output_dir=os.path.join(out_dir, "frames"))
-            _log(f"[{scene.id}] Sending {len(frames)} frames to vision model…")
-            qa = await vision_qa(
-                frames,
-                intent=scene.visual_spec,
-                narration=scene.narration,
-                beats=_format_scene_beats(scene),
-            )
+
+            # Cheap programmatic gate: catch static-slide slop without a vision call.
+            motion = motion_score(frames)
+            if 0.0 <= motion < _MIN_MOTION_SCORE:
+                _log(f"[{scene.id}] ⚠️ Static scene detected (motion={motion:.2f}) — skipping vision QA")
+                qa = QAResult(
+                    passed=False,
+                    issues=[
+                        f"Animation is effectively static (frame motion score {motion:.2f}/255). "
+                        "Sampled frames are nearly identical — this reads as a slide, not an animation.",
+                        "Add real visual change: Create shapes sequentially, Transform one object "
+                        "into another, move objects with .animate, and spread reveals across time.",
+                    ],
+                    correctness_issues=[],
+                    style_issues=["Static slide — no meaningful animation between sampled frames."],
+                )
+            else:
+                _log(f"[{scene.id}] Sending {len(frames)} frames to vision model…")
+                qa = await vision_qa(
+                    frames,
+                    intent=scene.visual_spec,
+                    narration=scene.narration,
+                    beats=_format_scene_beats(scene),
+                )
 
             if qa.passed:
                 dest = _save_clip(sandbox_result.clip_path, out_dir, scene.id)
                 scene.set_manim_code(code)
                 scene.set_clip(dest, qa_passed=True)
+                if scene.has_beats:
+                    durs = _extract_beat_durations_from_code(code, len(scene.beats))
+                    if durs:
+                        scene.beat_render_durations = durs
                 _emit(f"✅ done ({total_attempts} attempt{'s' if total_attempts > 1 else ''})")
                 _log(f"[{scene.id}] ✅ QA passed. Clip saved to {dest}")
                 log.info("manim_codegen.success", scene_id=scene.id, attempts=total_attempts)
@@ -592,6 +663,125 @@ def _format_repair_history(history: list[dict]) -> str:
 
 
 # ── New pre-checks ─────────────────────────────────────────────────────────────
+
+def _undefined_name_check(code: str) -> SandboxResult | None:
+    """Statically catch NameErrors before paying for a sandbox render.
+
+    Collects every name the code defines/imports plus the manim + numpy
+    namespaces, then walks the AST for Name loads that resolve to nothing.
+    Skips silently if manim is not importable in this process.
+    """
+    import builtins
+
+    try:
+        import manim as _manim
+        import numpy as _np
+    except ImportError:
+        return None
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None  # _syntax_check handles this
+
+    known: set[str] = set(dir(builtins)) | set(dir(_manim)) | {"np", "numpy", "manim", "self", "random"}
+
+    class _Collector(ast.NodeVisitor):
+        def visit_Import(self, node):
+            for alias in node.names:
+                known.add((alias.asname or alias.name).split(".")[0])
+        def visit_ImportFrom(self, node):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue  # star imports already covered by manim namespace
+                known.add(alias.asname or alias.name)
+        def visit_FunctionDef(self, node):
+            known.add(node.name)
+            for a in node.args.args + node.args.kwonlyargs:
+                known.add(a.arg)
+            if node.args.vararg: known.add(node.args.vararg.arg)
+            if node.args.kwarg: known.add(node.args.kwarg.arg)
+            self.generic_visit(node)
+        visit_AsyncFunctionDef = visit_FunctionDef
+        def visit_Lambda(self, node):
+            for a in node.args.args + node.args.kwonlyargs:
+                known.add(a.arg)
+            self.generic_visit(node)
+        def visit_ClassDef(self, node):
+            known.add(node.name)
+            self.generic_visit(node)
+        def visit_Name(self, node):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                known.add(node.id)
+            self.generic_visit(node)
+        def visit_comprehension(self, node):
+            for n in ast.walk(node.target):
+                if isinstance(n, ast.Name):
+                    known.add(n.id)
+            self.generic_visit(node)
+        def visit_ExceptHandler(self, node):
+            if node.name:
+                known.add(node.name)
+            self.generic_visit(node)
+        def visit_With(self, node):
+            for item in node.items:
+                if item.optional_vars:
+                    for n in ast.walk(item.optional_vars):
+                        if isinstance(n, ast.Name):
+                            known.add(n.id)
+            self.generic_visit(node)
+        def visit_For(self, node):
+            for n in ast.walk(node.target):
+                if isinstance(n, ast.Name):
+                    known.add(n.id)
+            self.generic_visit(node)
+
+    _Collector().visit(tree)
+
+    undefined: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in known and node.id not in undefined:
+                undefined.append(node.id)
+
+    if undefined:
+        return SandboxResult(
+            success=False,
+            error_type="runtime_error",
+            traceback=(
+                f"NameError (caught statically): undefined name(s): {', '.join(undefined[:8])}\n"
+                "Define these names, import them, or replace with valid Manim CE names.\n"
+                "Note: only manim and numpy are importable in the sandbox."
+            ),
+        )
+    return None
+
+
+def _manimlib_pattern_check(code: str) -> SandboxResult | None:
+    """Catch manimlib-only patterns that can't be auto-translated."""
+    if "GraphScene" in code:
+        return SandboxResult(
+            success=False,
+            error_type="runtime_error",
+            traceback=(
+                "GraphScene is old manimlib API and does not exist in Manim CE.\n"
+                "Subclass Scene and build axes manually:\n"
+                "    ax = Axes(x_range=[...], y_range=[...], axis_config={'color': P_AXIS})\n"
+                "    curve = ax.plot(lambda x: ..., color=P_BLUE)"
+            ),
+        )
+    import re
+    if re.search(r"^\s*CONFIG\s*=\s*\{", code, re.MULTILINE):
+        return SandboxResult(
+            success=False,
+            error_type="runtime_error",
+            traceback=(
+                "The CONFIG = {...} class dict is old manimlib API and is ignored by Manim CE.\n"
+                "Set these options directly in construct() or pass them to constructors."
+            ),
+        )
+    return None
+
 
 def _mathtex_incomplete_check(code: str) -> SandboxResult | None:
     """Catch incomplete LaTeX commands like \\frac without two {}{} groups.
@@ -732,6 +922,10 @@ async def _try_simplified_fallback(
         if qa.passed:
             scene.set_manim_code(code)
             scene.set_clip(dest, qa_passed=True)
+            if scene.has_beats:
+                durs = _extract_beat_durations_from_code(code, len(scene.beats))
+                if durs:
+                    scene.beat_render_durations = durs
             emit_cb("✅ simplified fallback passed QA")
             log_cb(f"[{scene.id}] ✅ Fallback QA passed. Clip saved to {dest}")
             log.info("manim_codegen.fallback_success", scene_id=scene.id)
@@ -766,10 +960,14 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
 
     beats_section = ""
     if scene.has_beats:
+        from app.models.video_spec import words_per_second
+        wps = words_per_second(spec.language)
         beats_list = "\n".join(
             f"  {b.order}. [{b.id}] {b.visual_action}\n"
             f"     Trigger phrase: \"{b.trigger_phrase}\"\n"
             f"     Narration: \"{b.narration_segment}\"\n"
+            f"     Target animation time: ~{max(len(b.narration_segment.split()) / wps, 2.0):.0f}s "
+            f"(spread run_time= and self.wait() to fill it)\n"
             f"     Must show: {_format_list_for_prompt(b.must_show)}\n"
             f"     On-screen label: {b.on_screen_label or '(none)'}\n"
             f"     Forbidden visuals: {_format_list_for_prompt(b.forbidden_visuals)}"
@@ -835,6 +1033,38 @@ async def _repair_runtime(
     )
     code = _strip_code_fences(resp.content)
     return _postprocess_generated_code(code)
+
+
+def _extract_beat_durations_from_code(code: str, n_beats: int) -> list[float]:
+    """Parse Manim code to estimate per-beat animation durations via static analysis.
+
+    Splits code at '# ═══ BEAT' markers, then sums self.play(run_time=X) and
+    self.wait(X) values within each section. Falls back to 1.0s per call when
+    run_time is not specified (Manim default).
+
+    Returns [] if section count doesn't match n_beats (can't reliably assign).
+    """
+    import re
+
+    sections = re.split(r'#\s*═+\s*BEAT\s+\S+', code)
+    beat_sections = sections[1:]  # sections[0] is preamble before first beat
+    if len(beat_sections) != n_beats:
+        return []
+
+    durations: list[float] = []
+    for section in beat_sections:
+        total = 0.0
+        for m in re.finditer(r'self\.wait\(([^)]*)\)', section):
+            arg = m.group(1).strip()
+            try:
+                total += float(arg) if arg else 1.0
+            except ValueError:
+                total += 1.0
+        for m in re.finditer(r'self\.play\(', section):
+            rt = re.search(r'run_time\s*=\s*([0-9.]+)', section[m.start():m.start() + 400])
+            total += float(rt.group(1)) if rt else 1.0
+        durations.append(max(total, 0.5))
+    return durations
 
 
 def _short_error(result: SandboxResult, max_chars: int = 1200) -> str:
@@ -960,6 +1190,7 @@ P_DIM    = "#55534E"
 
 
 def _postprocess_generated_code(code: str) -> str:
+    code = _fix_manimlib_api(code)
     code = _inject_palette_if_missing(code)
     code = _ensure_scene_subclass(code)
     code = _fix_background_color(code)
@@ -968,7 +1199,43 @@ def _postprocess_generated_code(code: str) -> str:
     code = _fix_missing_random_import(code)
     code = _fix_camera_scene_usage(code)
     code = _fix_interpolate_color_args(code)
+    code = _fix_zero_waits(code)
     return _fix_zero_animations(code)
+
+
+_MANIMLIB_REPLACEMENTS = [
+    # (pattern, replacement) — translate old manimlib API to Manim CE.
+    # These leak constantly from LLM training data and are the single biggest
+    # source of AttributeError/NameError repair cycles.
+    (r"\bShowCreation\b", "Create"),
+    (r"\bShowCreationThenFadeOut\b", "Create"),
+    (r"\bTextMobject\b", "Text"),
+    (r"\bTexMobject\b", "MathTex"),
+    (r"\bOldTex\b", "MathTex"),
+    (r"\.get_graph\(", ".plot("),
+    (r"\bFadeInFromDown\b", "FadeIn"),
+    (r"\bFadeOutAndShiftDown\b", "FadeOut"),
+]
+
+
+def _fix_manimlib_api(code: str) -> str:
+    """Translate common old-manimlib API leakage into Manim CE equivalents."""
+    import re
+    fixed = code
+    for pattern, replacement in _MANIMLIB_REPLACEMENTS:
+        fixed = re.sub(pattern, replacement, fixed)
+    if fixed != code:
+        log.warning("manim_codegen.auto_fix_manimlib_api")
+    return fixed
+
+
+def _fix_zero_waits(code: str) -> str:
+    """Replace self.wait(0) — an explicit anti-pattern — with a short real pause."""
+    import re
+    fixed = re.sub(r"self\.wait\(\s*0(?:\.0+)?\s*\)", "self.wait(0.5)", code)
+    if fixed != code:
+        log.warning("manim_codegen.auto_fix_zero_waits")
+    return fixed
 
 
 def _inject_palette_if_missing(code: str) -> str:
