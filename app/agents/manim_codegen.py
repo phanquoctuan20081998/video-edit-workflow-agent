@@ -757,6 +757,13 @@ async def _try_simplified_fallback(
 # ── LLM call helpers ───────────────────────────────────────────────────────────
 
 async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
+    # Template RAG: retrieve matching templates to give LLM a head start
+    from app.agents.template_rag import format_template_context, retrieve_templates_fast
+
+    beat_actions = [b.visual_action for b in sorted(scene.beats, key=lambda b: b.order)] if scene.has_beats else []
+    template_matches = retrieve_templates_fast(scene.visual_spec, beat_actions=beat_actions)
+    template_context = format_template_context(template_matches)
+
     beats_section = ""
     if scene.has_beats:
         beats_list = "\n".join(
@@ -775,6 +782,10 @@ async def _generate_code(llm, scene: Scene, spec: VideoSpec) -> str:
             beat_id="{beat_id}",
             visual_action="{visual_action}",
         )
+
+    # Append template context to beats section
+    if template_context:
+        beats_section = beats_section + template_context
 
     prompt = _GENERATE_PROMPT.format(
         visual_spec=scene.visual_spec,

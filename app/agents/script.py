@@ -326,11 +326,96 @@ class ScriptAgent:
 
         raise ScriptGenerationError(f"The {step} step could not be repaired into scene JSON.")
 
-    async def run(self, topic: str, language: str = "en") -> VideoSpec:
-        """Full pipeline: research → outline → VideoSpec."""
+    async def run(
+        self,
+        topic: str,
+        language: str = "en",
+        max_judge_reflections: int = 3,
+    ) -> VideoSpec:
+        """Full pipeline: research → outline → VideoSpec → judge → [reflect + retry].
+
+        The judge + reflect loop validates the spec BEFORE expensive Manim codegen.
+        If the spec fails validation, the reflection is fed back to the outline step
+        to regenerate a better spec (up to max_judge_reflections times).
+        """
+        from app.agents.spec_judge import judge_spec
+
         research, sources = await self.research(topic)
         outline = await self.outline(topic, research, language=language)
-        return await self.write_spec(topic, outline, sources, language=language)
+        spec = await self.write_spec(topic, outline, sources, language=language)
+
+        # Judge + reflect loop
+        for attempt in range(max_judge_reflections):
+            judge_result = await judge_spec(spec, include_llm_feasibility=True)
+            if judge_result.passed:
+                log.info("script.judge_passed", topic=topic, attempt=attempt)
+                return spec
+
+            log.warning(
+                "script.judge_failed",
+                topic=topic,
+                attempt=attempt,
+                errors=judge_result.error_count,
+                warnings=judge_result.warning_count,
+            )
+
+            if not judge_result.reflection:
+                break  # No actionable feedback — return best-effort
+
+            # Feed reflection back into outline regeneration
+            reflected_outline = await self._regenerate_with_reflection(
+                topic, research, outline, judge_result.reflection, language=language,
+            )
+            if reflected_outline:
+                outline = reflected_outline
+                spec = await self.write_spec(topic, outline, sources, language=language)
+
+        log.warning("script.judge_cap_reached", topic=topic, max=max_judge_reflections)
+        return spec
+
+    async def _regenerate_with_reflection(
+        self,
+        topic: str,
+        research: str,
+        previous_outline: list[dict],
+        reflection: str,
+        language: str = "en",
+    ) -> list[dict] | None:
+        """Regenerate outline incorporating judge reflection feedback."""
+        prompt = f"""\
+Regenerate the scene outline for topic "{topic}" based on the following reflection
+from a validation step that found problems in the previous version.
+
+Previous outline (has issues):
+{json.dumps(previous_outline, ensure_ascii=False, indent=2)[:10000]}
+
+Reflection (issues to fix):
+{reflection}
+
+Research context:
+{research[:3000]}
+
+Fix ALL issues mentioned in the reflection. Ensure:
+- Every trigger_phrase is an exact substring of its scene's narration
+- Beat narration_segments concatenate to cover the full narration
+- visual_spec is achievable with Manim CE (2D math, geometry, charts only)
+- Beats are in order
+- All narration is in "{language}"
+
+Return the corrected JSON array of scenes (same format as before).
+Return ONLY valid JSON. No markdown fences.
+"""
+        try:
+            resp = await self._llm.complete(
+                [LLMMessage(role="user", content=prompt)],
+                system=_OUTLINE_SYSTEM,
+                max_tokens=65000,
+                temperature=0.3,
+            )
+            return await self._parse_or_repair_json_array(resp.content, step="judge_reflect")
+        except ScriptGenerationError as e:
+            log.warning("script.reflect_regen_failed", error=str(e))
+            return None
 
 
 # ── Source fetching ────────────────────────────────────────────────────────────
